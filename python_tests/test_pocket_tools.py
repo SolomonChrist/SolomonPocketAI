@@ -99,6 +99,54 @@ class SolomonPocketToolsTest(unittest.TestCase):
         self.assertTrue(item_id.startswith("camera/camera-"))
         self.assertTrue(data.startswith(b"\xff\xd8\xff"))
 
+    def test_trusted_folder_reads_safe_nested_files_and_blocks_programs(self) -> None:
+        trusted = self.root / "Trusted"
+        nested = trusted / "Lessons"
+        nested.mkdir(parents=True)
+        (nested / "vocabulary.md").write_text("你好 means hello", encoding="utf-8")
+        (trusted / "run-me.exe").write_bytes(b"MZ")
+
+        tools = SolomonPocketTools(self.root / "AppData", trusted)
+        items = tools.list_items()
+
+        self.assertEqual(["trusted/Lessons/vocabulary.md"], [item["id"] for item in items])
+        result = tools.read_for_model("trusted/Lessons/vocabulary.md")
+        self.assertEqual("你好 means hello", result["text"])
+
+    def test_trusted_folder_writes_only_create_only_text_files(self) -> None:
+        trusted = self.root / "Trusted"
+        trusted.mkdir()
+        tools = SolomonPocketTools(self.root / "AppData", trusted)
+
+        first = tools.write_note("lesson.md", "First lesson")
+        second = tools.write_note("lesson.md", "Second lesson")
+
+        self.assertEqual("trusted/lesson.md", first)
+        self.assertEqual("trusted/lesson (2).md", second)
+        self.assertEqual("First lesson\n", (trusted / "lesson.md").read_text(encoding="utf-8"))
+        with self.assertRaises(PocketToolError):
+            tools.write_note("lesson.py", "print('no')")
+
+    def test_trusted_folder_rejects_escape_ids_and_hard_links(self) -> None:
+        trusted = self.root / "Trusted"
+        trusted.mkdir()
+        outside = self.root / "outside.txt"
+        outside.write_text("private", encoding="utf-8")
+        hard_link = trusted / "linked.txt"
+        try:
+            hard_link.hardlink_to(outside)
+        except OSError:
+            self.skipTest("Hard links are not available on this test filesystem")
+
+        tools = SolomonPocketTools(self.root / "AppData", trusted)
+        self.assertEqual([], tools.list_items())
+        with self.assertRaises(PocketToolError):
+            tools.read_for_model("trusted/../outside.txt")
+
+    def test_trusted_folder_rejects_an_entire_drive(self) -> None:
+        with self.assertRaisesRegex(PocketToolError, "entire drive"):
+            SolomonPocketTools.validate_trusted_root(Path(self.root.anchor))
+
 
 if __name__ == "__main__":
     unittest.main()

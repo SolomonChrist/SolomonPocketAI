@@ -8,6 +8,8 @@ The app stores downloaded models, conversation history, Markdown memory, importe
 
 The model receives logical item identifiers and bounded content. It does not receive arbitrary host paths and has no shell or general filesystem tool.
 
+The user may optionally replace the built-in file workspace with one explicitly selected trusted folder. Only its path is stored in the ignored local settings file. Model-facing operations receive logical IDs, never that host path. Safe-document reads are bounded to TXT, Markdown, JSON, CSV, PDF, PNG, JPEG, and WebP, while writes remain create-only TXT/Markdown. Link/reparse escapes, hard links, traversal, executable/script formats, drive roots, and the whole home directory are refused at the application layer.
+
 ## Camera
 
 Camera access happens only after an explicit camera action. The app opens camera device 0, captures one frame, releases the device, and analyzes the saved local frame. It does not provide background or continuous camera access.

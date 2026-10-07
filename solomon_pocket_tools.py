@@ -11,11 +11,13 @@ import json
 import io
 import os
 import re
+import stat
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 MAX_IMPORT_BYTES = 20 * 1024 * 1024
@@ -25,6 +27,7 @@ MAX_PDF_PAGES = 50
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 16_000_000
 MAX_NOTE_CHARS = 100_000
+MAX_LISTED_FILES = 500
 ALLOWED_EXTENSIONS = {".txt", ".md", ".json", ".csv", ".pdf", ".png", ".jpg", ".jpeg", ".webp"}
 TEXT_EXTENSIONS = {".txt", ".md", ".json", ".csv"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -40,18 +43,73 @@ class PocketToolError(RuntimeError):
 
 
 class SolomonPocketTools:
-    def __init__(self, data_root: Path) -> None:
+    def __init__(self, data_root: Path, trusted_root: str | Path | None = None) -> None:
         self.data_root = data_root.resolve()
-        self.vault_root = self.data_root / "vault"
-        self.inbox_root = self.vault_root / "inbox"
-        self.notes_root = self.vault_root / "notes"
-        self.outbox_root = self.vault_root / "outbox"
+        self.trusted_root = self.validate_trusted_root(trusted_root) if trusted_root else None
+        self.vault_root = self.trusted_root or (self.data_root / "vault")
+        self.inbox_root = self.trusted_root or (self.vault_root / "inbox")
+        self.notes_root = self.trusted_root or (self.vault_root / "notes")
+        self.outbox_root = self.trusted_root or (self.vault_root / "outbox")
         self.camera_root = self.data_root / "derived" / "camera"
         self.ensure_layout()
 
     def ensure_layout(self) -> None:
-        for folder in (self.inbox_root, self.notes_root, self.outbox_root, self.camera_root):
+        folders = (self.camera_root,) if self.trusted_root else (
+            self.inbox_root,
+            self.notes_root,
+            self.outbox_root,
+            self.camera_root,
+        )
+        for folder in folders:
             folder.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _is_link_or_reparse(path: Path) -> bool:
+        """Reject symlinks and Windows junction/reparse points without following them."""
+        try:
+            details = os.lstat(path)
+        except OSError:
+            return True
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        return stat.S_ISLNK(details.st_mode) or bool(
+            getattr(details, "st_file_attributes", 0) & reparse_flag
+        )
+
+    @classmethod
+    def validate_trusted_root(cls, selected: str | Path) -> Path:
+        candidate = Path(str(selected).strip()).expanduser()
+        if not str(selected).strip() or not candidate.exists() or not candidate.is_dir():
+            raise PocketToolError("Choose an existing folder for trusted file access.")
+        if cls._is_link_or_reparse(candidate):
+            raise PocketToolError("A shortcut, symbolic link, junction, or reparse point cannot be trusted.")
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as exc:
+            raise PocketToolError("The trusted folder could not be resolved safely.") from exc
+        if resolved == Path(resolved.anchor):
+            raise PocketToolError("Choose a specific folder, not an entire drive.")
+        try:
+            if resolved == Path.home().resolve(strict=True):
+                raise PocketToolError("Choose a specific folder, not your entire home folder.")
+        except OSError:
+            pass
+        return resolved
+
+    @property
+    def workspace_name(self) -> str:
+        return "trusted folder" if self.trusted_root else "protected app workspace"
+
+    @property
+    def workspace_path(self) -> Path:
+        return self.trusted_root or self.vault_root
+
+    def _active_trusted_root(self) -> Path | None:
+        if self.trusted_root is None:
+            return None
+        current = self.validate_trusted_root(self.trusted_root)
+        if current != self.trusted_root:
+            raise PocketToolError("The trusted folder changed identity and was refused.")
+        return current
 
     @staticmethod
     def _safe_name(name: str, default_extension: str | None = None) -> str:
@@ -116,7 +174,8 @@ class SolomonPocketTools:
         if extension in IMAGE_EXTENSIONS:
             self._validate_image(source)
         name = self._safe_name(source.name)
-        destination = self._unique_destination(self.inbox_root, name)
+        destination_root = self._active_trusted_root() or self.inbox_root
+        destination = self._unique_destination(destination_root, name)
         temporary = destination.with_suffix(destination.suffix + ".importing")
         try:
             with source.open("rb") as reader, temporary.open("xb") as writer:
@@ -135,7 +194,7 @@ class SolomonPocketTools:
         finally:
             if temporary.exists():
                 temporary.unlink()
-        return f"inbox/{destination.name}"
+        return f"trusted/{destination.name}" if self.trusted_root else f"inbox/{destination.name}"
 
     def _validate_image(self, path: Path) -> None:
         if path.stat().st_size > MAX_IMAGE_BYTES:
@@ -154,6 +213,8 @@ class SolomonPocketTools:
             raise PocketToolError("The image could not be safely decoded.") from exc
 
     def list_items(self) -> list[dict[str, object]]:
+        if self.trusted_root:
+            return self._list_trusted_items()
         items: list[dict[str, object]] = []
         for label, folder in (
             ("inbox", self.inbox_root),
@@ -173,11 +234,69 @@ class SolomonPocketTools:
                 )
         return sorted(items, key=lambda item: (-float(item["modified"]), str(item["id"]).casefold()))
 
+    def _list_trusted_items(self) -> list[dict[str, object]]:
+        root = self._active_trusted_root()
+        if root is None:
+            return []
+        items: list[dict[str, object]] = []
+        for current, directories, names in os.walk(root, topdown=True, followlinks=False):
+            current_path = Path(current)
+            directories[:] = [
+                name
+                for name in directories
+                if self._trusted_directory_allowed(current_path / name, root)
+            ]
+            for name in names:
+                path = current_path / name
+                if not self._trusted_file_allowed(path, root):
+                    continue
+                details = path.stat()
+                relative = path.relative_to(root).as_posix()
+                items.append(
+                    {
+                        "id": f"trusted/{relative}",
+                        "size": details.st_size,
+                        "modified": details.st_mtime,
+                    }
+                )
+                if len(items) >= MAX_LISTED_FILES:
+                    return sorted(
+                        items,
+                        key=lambda item: (-float(item["modified"]), str(item["id"]).casefold()),
+                    )
+        return sorted(items, key=lambda item: (-float(item["modified"]), str(item["id"]).casefold()))
+
+    @classmethod
+    def _trusted_directory_allowed(cls, path: Path, root: Path) -> bool:
+        if cls._is_link_or_reparse(path):
+            return False
+        try:
+            return path.is_dir() and path.resolve(strict=True).is_relative_to(root)
+        except (OSError, RuntimeError):
+            return False
+
+    @classmethod
+    def _trusted_file_allowed(cls, path: Path, root: Path) -> bool:
+        if path.suffix.casefold() not in ALLOWED_EXTENSIONS or cls._is_link_or_reparse(path):
+            return False
+        try:
+            details = os.lstat(path)
+            resolved = path.resolve(strict=True)
+            return (
+                stat.S_ISREG(details.st_mode)
+                and details.st_nlink == 1
+                and resolved.is_relative_to(root)
+            )
+        except (OSError, RuntimeError):
+            return False
+
     def format_item_list(self) -> str:
         items = self.list_items()
         if not items:
+            if self.trusted_root:
+                return "The trusted folder has no supported safe files."
             return "The protected workspace is empty. Use Import file to copy something into it."
-        lines = ["Protected workspace files:"]
+        lines = ["Trusted folder files:" if self.trusted_root else "Protected workspace files:"]
         for item in items[:50]:
             lines.append(f"- {item['id']} ({int(item['size']):,} bytes)")
         return "\n".join(lines)
@@ -185,13 +304,18 @@ class SolomonPocketTools:
     def _resolve_item(self, item_id: str | None) -> tuple[str, Path]:
         items = self.list_items()
         if not items:
-            raise PocketToolError("The protected workspace is empty. Import a file first.")
+            message = (
+                "The trusted folder has no supported safe files."
+                if self.trusted_root
+                else "The protected workspace is empty. Import a file first."
+            )
+            raise PocketToolError(message)
         requested = (item_id or "").strip()
         if not requested:
             chosen = items[0]
         elif "/" in requested:
-            if requested.count("/") != 1 or "\\" in requested or requested.startswith("/"):
-                raise PocketToolError("Use a workspace ID such as inbox/report.pdf.")
+            if "\\" in requested or requested.startswith("/"):
+                raise PocketToolError("Use a logical file ID shown by /files.")
             matches = [item for item in items if str(item["id"]).casefold() == requested.casefold()]
             if len(matches) != 1:
                 raise PocketToolError("That workspace file was not found.")
@@ -203,6 +327,14 @@ class SolomonPocketTools:
                 raise PocketToolError("The file name was not found or is ambiguous; use the ID shown by /files.")
             chosen = matches[0]
         label, name = str(chosen["id"]).split("/", 1)
+        if label == "trusted" and self.trusted_root:
+            relative = PurePosixPath(name)
+            if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+                raise PocketToolError("The trusted-folder item failed its confinement check.")
+            path = self.trusted_root.joinpath(*relative.parts)
+            if not self._trusted_file_allowed(path, self.trusted_root):
+                raise PocketToolError("The trusted-folder item failed its confinement check.")
+            return str(chosen["id"]), path
         folder = {"inbox": self.inbox_root, "notes": self.notes_root, "outbox": self.outbox_root}[label]
         path = folder / self._safe_name(name)
         if path.is_symlink() or not path.is_file() or path.parent.resolve() != folder.resolve():
@@ -286,12 +418,20 @@ class SolomonPocketTools:
         safe_name = self._safe_name(name, ".md")
         if Path(safe_name).suffix.casefold() not in {".md", ".txt"}:
             raise PocketToolError("Solomon Pocket AI may write only Markdown or text files.")
-        folder = self.outbox_root if outbox else self.notes_root
+        folder = self._active_trusted_root() or (self.outbox_root if outbox else self.notes_root)
         destination = self._unique_destination(folder, safe_name)
-        temporary = destination.with_suffix(destination.suffix + ".tmp")
-        temporary.write_text(cleaned + "\n", encoding="utf-8", newline="\n")
-        os.replace(temporary, destination)
-        label = "outbox" if outbox else "notes"
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".solomon-", suffix=".tmp", dir=folder)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(cleaned + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        label = "trusted" if self.trusted_root else ("outbox" if outbox else "notes")
         return f"{label}/{destination.name}"
 
     def capture_camera(self, device_index: int = 0) -> tuple[str, bytes]:

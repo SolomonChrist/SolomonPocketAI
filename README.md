@@ -39,12 +39,15 @@ Open **Settings** in the main window to see and test the exact local stack:
 - Whisper speech-to-text size, with an in-app download button for additional supported models.
 - Installed Kokoro voice model, all 54 available voice styles, language/gender labels, and voice speed.
 - Standard, Large, and Extra Large interface text sizes that apply throughout the app and persist locally.
+- An optional single trusted folder that replaces the private app workspace as the only file area the assistant can use.
 
 The app adapts microphone sample rates and automatically resamples Kokoro audio for speakers that do not accept its native 24 kHz output. Audio choices are saved by device name and Windows audio backend rather than unstable device numbers. If a monitor, dock, headset, or speaker was just connected, click **Refresh devices**. If Windows has no active default speaker, Solomon Pocket AI prefers a device explicitly named **Speakers** and lets you test or override it.
 
 ## Privacy boundary
 
-Runtime files live only in `SolomonPocketAIData/`, and Git ignores that entire directory. The model cannot browse arbitrary files, execute shell commands, or continuously access the camera. Files must be selected by you and are copied into its protected workspace before use.
+Runtime files live only in `SolomonPocketAIData/`, and Git ignores that entire directory. The model cannot browse arbitrary files, execute shell commands, or continuously access the camera. By default, files must be selected by you and are copied into its protected workspace before use.
+
+You can optionally choose exactly one **Trusted Folder** in Settings. Solomon Pocket AI then sees only supported files inside that folder through logical IDs rather than Windows paths. It may read bounded TXT, MD, JSON, CSV, PDF, PNG, JPG/JPEG, and WebP files and create new TXT or MD files. Programs, scripts, shortcuts, symlinks, junctions/reparse points, hard-linked files, traversal paths, and files outside the selected folder are blocked. Choosing an entire drive or your whole home folder is also refused. This is an application-level safety boundary; a packaged release still needs the planned operating-system sandbox for defense in depth.
 
 The three-response replay cache also stays inside `SolomonPocketAIData/`. It rotates automatically and is erased when you clear the conversation.
 

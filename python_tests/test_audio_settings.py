@@ -26,6 +26,21 @@ class AudioSettingsTest(unittest.TestCase):
                 app.save_settings(settings)
                 self.assertEqual(1.0, app.load_settings()["interface_scale"])
 
+    def test_trusted_folder_setting_is_local_and_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            settings_file = temporary_path / "settings.json"
+            trusted_folder = temporary_path / "Trusted Files"
+            trusted_folder.mkdir()
+            settings = dict(app.DEFAULT_SETTINGS)
+            settings["trusted_folder"] = str(trusted_folder)
+            with (
+                mock.patch.object(app, "SETTINGS_FILE", settings_file),
+                mock.patch.object(app, "ensure_local_layout"),
+            ):
+                app.save_settings(settings)
+                self.assertEqual(str(trusted_folder), app.load_settings()["trusted_folder"])
+
     def test_font_size_scaling_preserves_pixel_font_sign(self) -> None:
         self.assertEqual(13, app._scaled_font_size(10, 1.3))
         self.assertEqual(-13, app._scaled_font_size(-10, 1.3))

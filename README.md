@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/solomon-christ-logo.png" width="320" alt="Solomon Christ logo">
+  <img src="assets/solomon-christ-logo-white.jpg" width="360" alt="Solomon Christ logo">
 </p>
 
 # Solomon Pocket AI
@@ -66,6 +66,11 @@ powershell -NoProfile -File .\scripts\check-public-repo.ps1
 
 This is the first useful Windows release. Linux and macOS packaging are planned after the Windows experience is stable. The Android/phone version comes later, based on the same proven local conversation system.
 
-Project website: [solomonchrist.com](https://www.solomonchrist.com)
+## Contribute or support the project
+
+Ideas, testing help, code contributions, and support for continued development are welcome.
+
+- Website: [www.SolomonChrist.com](https://www.solomonchrist.com)
+- Contact or donation inquiries: [solomon@solomonchrist.com](mailto:solomon@solomonchrist.com)
 
 No open-source license has been selected yet. Do not publish the repository as open source until a license is added.

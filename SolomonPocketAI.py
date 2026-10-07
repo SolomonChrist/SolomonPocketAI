@@ -909,6 +909,13 @@ class SolomonPocketAIApp:
             fg="#0b756b",
             bg="#f5f2eb",
         ).pack(anchor="w", pady=(2, 0))
+        tk.Label(
+            brand_copy,
+            text="www.SolomonChrist.com",
+            font=("Segoe UI", 9),
+            fg="#64737a",
+            bg="#f5f2eb",
+        ).pack(anchor="w", pady=(2, 0))
 
         badge = tk.Label(
             header,

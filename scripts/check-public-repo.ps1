@@ -16,13 +16,13 @@ $windowsUsers = 'C:' + [char]92 + 'Users' + [char]92
 $macUsers = '/' + 'Users' + '/'
 $linuxHome = '/' + 'home' + '/'
 $emailPattern = '[A-Z0-9._%+-]+' + [regex]::Escape([string][char]64) + '[A-Z0-9.-]+\.[A-Z]{2,}'
+$approvedPublicEmails = @('solomon@solomonchrist.com')
 $privateKeyMarker = 'BEGIN ' + 'PRIVATE KEY'
 $secretPrefix = 'sk' + '-[A-Za-z0-9]{20,}'
 $contentChecks = @(
     @{ Name = 'absolute Windows user path'; Pattern = [regex]::Escape($windowsUsers) },
     @{ Name = 'absolute macOS user path'; Pattern = [regex]::Escape($macUsers) + '[^/\s]+' },
     @{ Name = 'absolute Linux home path'; Pattern = [regex]::Escape($linuxHome) + '[^/\s]+' },
-    @{ Name = 'email address'; Pattern = $emailPattern },
     @{ Name = 'private key'; Pattern = [regex]::Escape($privateKeyMarker) },
     @{ Name = 'API-key-shaped token'; Pattern = $secretPrefix }
 )
@@ -53,6 +53,11 @@ foreach ($relative in $files) {
             $findings.Add("$relative - contains $($check.Name)")
         }
     }
+    foreach ($match in [regex]::Matches($content, $emailPattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+        if ($approvedPublicEmails -notcontains $match.Value.ToLowerInvariant()) {
+            $findings.Add("$relative - contains an unapproved email address")
+        }
+    }
 }
 
 Write-Host "Public Git candidate files: $($files.Count)"
@@ -63,4 +68,4 @@ if ($findings.Count -gt 0) {
     exit 1
 }
 
-Write-Host "`nPUBLICATION SURFACE PASSED: no personal paths, email addresses, common secrets, runtime data, or model binaries found." -ForegroundColor Green
+Write-Host "`nPUBLICATION SURFACE PASSED: no personal paths, unapproved email addresses, common secrets, runtime data, or model binaries found." -ForegroundColor Green

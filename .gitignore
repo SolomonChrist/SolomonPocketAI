@@ -1,0 +1,38 @@
+.gradle/
+.kotlin/
+build/
+out/
+.idea/
+*.iml
+local.properties
+.tmp_blueprint_render/
+.work/
+PocketAIData/
+SolomonPocketAIData/
+.venv/
+__pycache__/
+*.py[cod]
+*.download
+
+# Private development harness and local project records
+AGENTS.md
+RULES.md
+TURN.md
+LOG.md
+ROLES/
+WORK/
+scripts/showcase.ps1
+scripts/verify-structure.ps1
+Pocket_AI_Implementation_Update_Seeker_Reference.pdf
+Pocket_AI_Offline_OS_Blueprint.docx
+Pocket_AI_Offline_OS_Blueprint_Open_Source_Solomon_Christ.pdf
+
+# The public desktop release is intentionally small. The experimental kernel
+# remains local until it is integrated into the user-facing application.
+src/
+docs/
+gradle/
+gradlew
+gradlew.bat
+build.gradle.kts
+settings.gradle.kts

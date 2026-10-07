@@ -80,4 +80,6 @@ Ideas, testing help, code contributions, and support for continued development a
 - Website: [www.SolomonChrist.com](https://www.solomonchrist.com)
 - Contact or donation inquiries: [solomon@solomonchrist.com](mailto:solomon@solomonchrist.com)
 
-No open-source license has been selected yet. Do not publish the repository as open source until a license is added.
+## License
+
+Solomon Pocket AI is open-source software released under the [Apache License 2.0](LICENSE). The accompanying [NOTICE](NOTICE) contains the attribution that must be preserved when applicable under the license. Third-party models, dependencies, and services retain their respective licenses and terms.

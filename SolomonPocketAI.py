@@ -422,7 +422,7 @@ VOICE_LANGUAGES = {
     "i": ("Italian", "it"),
     "j": ("Japanese", "ja"),
     "p": ("Portuguese", "pt-br"),
-    "z": ("Chinese", "zh"),
+    "z": ("Chinese", "cmn"),
 }
 
 
@@ -435,6 +435,12 @@ def voice_display_name(voice: str) -> str:
     gender = "female" if len(voice) > 1 and voice[1] == "f" else "male"
     friendly = voice.split("_", 1)[-1].replace("_", " ").title()
     return f"{friendly} - {language}, {gender} ({voice})"
+
+
+def voice_preview_text(voice: str) -> str:
+    if voice.startswith("z"):
+        return "你好，这是所罗门口袋人工智能的中文语音测试。"
+    return "This is the selected Solomon Pocket AI voice and speaker output."
 
 
 def build_turn_prompt(reply_seconds: int) -> str:
@@ -654,6 +660,7 @@ class VoiceEngines:
     ) -> None:
         self._whisper = None
         self._kokoro = None
+        self._zh_g2p = None
         self._lock = threading.Lock()
         self._transcribe_lock = threading.Lock()
         self.output_device = output_device
@@ -712,11 +719,24 @@ class VoiceEngines:
 
     def synthesize(self, text: str) -> tuple[np.ndarray, int]:
         kokoro = self.load_kokoro()
+        is_phonemes = False
+        speech_text = text[:1800]
+        if self.voice.startswith("z"):
+            if self._zh_g2p is None:
+                from misaki import zh
+
+                self._zh_g2p = zh.ZHG2P(version=None)
+            speech_text, _tokens = self._zh_g2p(
+                speech_text,
+                en_callable=lambda segment: kokoro.tokenizer.phonemize(segment, "en-us"),
+            )
+            is_phonemes = True
         samples, sample_rate = kokoro.create(
-            text[:1800],
+            speech_text,
             voice=self.voice,
             speed=self.voice_speed,
             lang=voice_language(self.voice),
+            is_phonemes=is_phonemes,
         )
         return np.asarray(samples, dtype=np.float32), int(sample_rate)
 
@@ -2077,7 +2097,7 @@ class SettingsDialog:
                     voice=voice,
                     voice_speed=voice_speed,
                 )
-                preview_engine.speak("This is the selected Solomon Pocket AI voice and speaker output.")
+                preview_engine.speak(voice_preview_text(voice))
                 self.app.root.after(0, lambda: self._set_busy(False, "Speaker test finished. Did you hear the voice?"))
             except Exception as exc:
                 message = str(exc)

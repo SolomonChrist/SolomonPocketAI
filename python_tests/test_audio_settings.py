@@ -9,6 +9,11 @@ import SolomonPocketAI as app
 
 
 class AudioSettingsTest(unittest.TestCase):
+    def test_chinese_voice_uses_mandarin_code_and_preview(self) -> None:
+        self.assertEqual("cmn", app.voice_language("zf_xiaoni"))
+        preview = app.voice_preview_text("zf_xiaoni")
+        self.assertIn("中文语音测试", preview)
+
     def test_resample_converts_kokoro_rate_for_realtek_style_output(self) -> None:
         samples = np.zeros(24_000, dtype=np.float32)
         converted = app.resample_audio(samples, 24_000, 44_100)

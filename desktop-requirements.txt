@@ -2,6 +2,7 @@ openai-whisper==20250625
 sounddevice==0.5.5
 numpy==2.4.6
 kokoro-onnx==0.6.1
+misaki[zh]==0.9.4
 onnxruntime==1.30.0
 pypdf==6.1.1
 Pillow==11.1.0

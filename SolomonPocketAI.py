@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
 from PIL import Image, ImageTk
@@ -55,6 +56,11 @@ WHISPER_MODEL_CHOICES = (
 )
 SAMPLE_RATE = 16_000
 VALID_SECONDS = (5, 10, 15, 20, 25, 30)
+FONT_SCALE_CHOICES = {
+    "Standard (100%)": 1.0,
+    "Large (115%)": 1.15,
+    "Extra large (130%)": 1.3,
+}
 DEFAULT_SETTINGS = {
     "max_input_seconds": 15,
     "max_reply_seconds": 10,
@@ -68,6 +74,7 @@ DEFAULT_SETTINGS = {
     "voice_model": KOKORO_MODEL.name,
     "voice": "af_heart",
     "voice_speed": 1.0,
+    "interface_scale": 1.0,
 }
 MAX_ACTIVE_MEMORIES = 40
 MAX_MEMORY_CONTEXT_CHARS = 2_500
@@ -78,6 +85,10 @@ MAX_REPLAY_SAMPLES = 3_000_000
 PARTIAL_TRANSCRIPT_SECONDS = 2.0
 STREAMING_SPEECH_MIN_CHARS = 28
 STREAMING_SPEECH_MAX_CHARS = 120
+UI_FONT_ROOT: tk.Misc | None = None
+UI_FONT_SCALE = 1.0
+UI_FONTS: dict[tuple[int, str], tkfont.Font] = {}
+NAMED_FONT_BASE_SIZES: dict[str, int] = {}
 SYSTEM_PROMPT = (
     "You are Solomon Pocket AI, a private local artificial-intelligence assistant. "
     "You are not a human or living being. Your exact current language model is "
@@ -92,6 +103,50 @@ SYSTEM_PROMPT = (
     "thoughtful conversation. Be warm and direct. Default to two or three short "
     "spoken sentences unless the user asks for depth."
 )
+
+
+def _scaled_font_size(size: int, scale: float) -> int:
+    sign = -1 if size < 0 else 1
+    return sign * max(1, round(abs(size) * scale))
+
+
+def configure_ui_font_scale(root: tk.Misc, scale: float) -> None:
+    """Apply one saved font scale to app fonts and Tk/ttk defaults immediately."""
+    global UI_FONT_ROOT, UI_FONT_SCALE
+    UI_FONT_ROOT = root
+    UI_FONT_SCALE = scale if scale in FONT_SCALE_CHOICES.values() else 1.0
+    for (base_size, _weight), font in UI_FONTS.items():
+        font.configure(size=_scaled_font_size(base_size, UI_FONT_SCALE))
+    for name in (
+        "TkDefaultFont",
+        "TkTextFont",
+        "TkMenuFont",
+        "TkHeadingFont",
+        "TkCaptionFont",
+        "TkSmallCaptionFont",
+        "TkTooltipFont",
+        "TkFixedFont",
+    ):
+        try:
+            font = tkfont.nametofont(name, root=root)
+            NAMED_FONT_BASE_SIZES.setdefault(name, int(font.actual("size")))
+            font.configure(size=_scaled_font_size(NAMED_FONT_BASE_SIZES[name], UI_FONT_SCALE))
+        except tk.TclError:
+            continue
+
+
+def ui_font(size: int, weight: str = "normal") -> tkfont.Font:
+    if UI_FONT_ROOT is None:
+        raise RuntimeError("UI fonts were requested before the Tk root was configured.")
+    key = (size, weight)
+    if key not in UI_FONTS:
+        UI_FONTS[key] = tkfont.Font(
+            root=UI_FONT_ROOT,
+            family="Segoe UI",
+            size=_scaled_font_size(size, UI_FONT_SCALE),
+            weight=weight,
+        )
+    return UI_FONTS[key]
 
 
 def ensure_local_layout() -> None:
@@ -263,6 +318,9 @@ def load_settings() -> dict[str, object]:
     candidate_speed = loaded.get("voice_speed")
     if isinstance(candidate_speed, (int, float)) and 0.5 <= float(candidate_speed) <= 2.0:
         settings["voice_speed"] = float(candidate_speed)
+    candidate_scale = loaded.get("interface_scale")
+    if isinstance(candidate_scale, (int, float)) and float(candidate_scale) in FONT_SCALE_CHOICES.values():
+        settings["interface_scale"] = float(candidate_scale)
     return settings
 
 
@@ -282,6 +340,12 @@ def save_settings(settings: dict[str, object]) -> None:
         float(candidate_speed)
         if isinstance(candidate_speed, (int, float)) and 0.5 <= float(candidate_speed) <= 2.0
         else DEFAULT_SETTINGS["voice_speed"]
+    )
+    candidate_scale = settings.get("interface_scale")
+    clean["interface_scale"] = (
+        float(candidate_scale)
+        if isinstance(candidate_scale, (int, float)) and float(candidate_scale) in FONT_SCALE_CHOICES.values()
+        else DEFAULT_SETTINGS["interface_scale"]
     )
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     temporary = SETTINGS_FILE.with_suffix(".tmp")
@@ -945,6 +1009,7 @@ class SolomonPocketAIApp:
         global OLLAMA_MODEL
         self.root = root
         self.settings = load_settings()
+        configure_ui_font_scale(root, float(self.settings.get("interface_scale", 1.0)))
         OLLAMA_MODEL = str(self.settings.get("language_model", OLLAMA_MODEL))
         self.engines = VoiceEngines(
             output_device=self.settings.get("output_device"),
@@ -985,7 +1050,7 @@ class SolomonPocketAIApp:
             tk.Label(
                 header,
                 text="SC",
-                font=("Segoe UI", 24, "bold"),
+                font=ui_font(24, "bold"),
                 fg="#0a1720",
                 bg="#f5f2eb",
             ).pack(side=tk.LEFT)
@@ -995,21 +1060,21 @@ class SolomonPocketAIApp:
         tk.Label(
             brand_copy,
             text="Solomon Pocket AI",
-            font=("Segoe UI", 24, "bold"),
+            font=ui_font(24, "bold"),
             fg="#102128",
             bg="#f5f2eb",
         ).pack(anchor="w")
         tk.Label(
             brand_copy,
             text="Private. Local. Yours.",
-            font=("Segoe UI", 11),
+            font=ui_font(11),
             fg="#0b756b",
             bg="#f5f2eb",
         ).pack(anchor="w", pady=(2, 0))
         tk.Label(
             brand_copy,
             text="www.SolomonChrist.com",
-            font=("Segoe UI", 9),
+            font=ui_font(9),
             fg="#64737a",
             bg="#f5f2eb",
         ).pack(anchor="w", pady=(2, 0))
@@ -1017,7 +1082,7 @@ class SolomonPocketAIApp:
         badge = tk.Label(
             header,
             text="●  LOCAL MODE",
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(9, "bold"),
             fg="#08685f",
             bg="#dcefe9",
             padx=12,
@@ -1029,7 +1094,7 @@ class SolomonPocketAIApp:
             root,
             text="",
             anchor="w",
-            font=("Segoe UI", 9),
+            font=ui_font(9),
             fg="#66757d",
             bg="#f5f2eb",
         )
@@ -1054,7 +1119,7 @@ class SolomonPocketAIApp:
         self.transcript = scrolledtext.ScrolledText(
             conversation_card,
             wrap=tk.WORD,
-            font=("Segoe UI", 11),
+            font=ui_font(11),
             bg="#ffffff",
             fg="#1c2a30",
             insertbackground="#102128",
@@ -1064,8 +1129,8 @@ class SolomonPocketAIApp:
             height=8,
         )
         self.transcript.pack(fill=tk.BOTH, expand=True)
-        self.transcript.tag_configure("user_name", foreground="#0b756b", font=("Segoe UI", 10, "bold"))
-        self.transcript.tag_configure("assistant_name", foreground="#102128", font=("Segoe UI", 10, "bold"))
+        self.transcript.tag_configure("user_name", foreground="#0b756b", font=ui_font(10, "bold"))
+        self.transcript.tag_configure("assistant_name", foreground="#102128", font=ui_font(10, "bold"))
         self.transcript.tag_configure("message", foreground="#2d3d44", spacing3=10)
         self.transcript.configure(state=tk.DISABLED)
 
@@ -1074,7 +1139,7 @@ class SolomonPocketAIApp:
         tk.Label(
             replay_bar,
             text="Replay voice:",
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(9, "bold"),
             fg="#40545c",
             bg="#f5f2eb",
         ).pack(side=tk.LEFT, padx=(0, 8))
@@ -1094,7 +1159,7 @@ class SolomonPocketAIApp:
         entry_row.pack(fill=tk.X, padx=24)
         self.entry = tk.Entry(
             entry_row,
-            font=("Segoe UI", 11),
+            font=ui_font(11),
             bg="#ffffff",
             fg="#15262d",
             insertbackground="#15262d",
@@ -1115,7 +1180,7 @@ class SolomonPocketAIApp:
             activebackground="#09675e",
             activeforeground="#ffffff",
             relief=tk.FLAT,
-            font=("Segoe UI", 10, "bold"),
+            font=ui_font(10, "bold"),
             cursor="hand2",
         )
         self.send_button.pack(side=tk.LEFT, padx=(8, 0), ipady=7)
@@ -1130,7 +1195,7 @@ class SolomonPocketAIApp:
             fg="#ffffff",
             activebackground="#09675e",
             activeforeground="#ffffff",
-            font=("Segoe UI", 11, "bold"),
+            font=ui_font(11, "bold"),
             relief=tk.FLAT,
             cursor="hand2",
             width=18,
@@ -1158,7 +1223,7 @@ class SolomonPocketAIApp:
             root,
             textvariable=self.status,
             anchor="w",
-            font=("Segoe UI", 9),
+            font=ui_font(9),
             fg="#68777e",
             bg="#f5f2eb",
         )
@@ -1196,7 +1261,7 @@ class SolomonPocketAIApp:
             activebackground="#d5e3df",
             activeforeground="#102128",
             relief=tk.FLAT,
-            font=("Segoe UI", 10),
+            font=ui_font(10),
             padx=14,
             pady=7,
             cursor="hand2",
@@ -1213,7 +1278,7 @@ class SolomonPocketAIApp:
             activebackground="#d5e3df",
             activeforeground="#102128",
             relief=tk.FLAT,
-            font=("Segoe UI", 9),
+            font=ui_font(9),
             padx=12,
             pady=7,
             cursor="hand2",
@@ -1897,14 +1962,14 @@ class SettingsDialog:
         tk.Label(
             self.window,
             text="Settings",
-            font=("Segoe UI", 22, "bold"),
+            font=ui_font(22, "bold"),
             fg="#102128",
             bg="#f5f2eb",
         ).pack(anchor="w", padx=24, pady=(18, 2))
         tk.Label(
             self.window,
-            text="Choose exactly which local devices, models, and voice Solomon Pocket AI uses.",
-            font=("Segoe UI", 10),
+            text="Choose the local devices, models, voice, and interface size Solomon Pocket AI uses.",
+            font=ui_font(10),
             fg="#64737a",
             bg="#f5f2eb",
         ).pack(anchor="w", padx=24, pady=(0, 12))
@@ -1913,8 +1978,10 @@ class SettingsDialog:
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=24)
         self.audio_tab = tk.Frame(self.notebook, bg="#ffffff", padx=20, pady=18)
         self.models_tab = tk.Frame(self.notebook, bg="#ffffff", padx=20, pady=18)
+        self.appearance_tab = tk.Frame(self.notebook, bg="#ffffff", padx=20, pady=18)
         self.notebook.add(self.audio_tab, text="Microphone & Speaker")
         self.notebook.add(self.models_tab, text="Models & Voice")
+        self.notebook.add(self.appearance_tab, text="Appearance")
 
         self.input_options = audio_device_options("input")
         self.output_options = audio_device_options("output")
@@ -1954,6 +2021,14 @@ class SettingsDialog:
         self.voice_speed_var = tk.StringVar(value=f"{float(app.settings.get('voice_speed', 1.0)):.2f}")
         self._build_models_tab()
 
+        current_scale = float(app.settings.get("interface_scale", 1.0))
+        current_scale_label = next(
+            (label for label, scale in FONT_SCALE_CHOICES.items() if scale == current_scale),
+            "Standard (100%)",
+        )
+        self.interface_scale_var = tk.StringVar(value=current_scale_label)
+        self._build_appearance_tab()
+
         bottom = tk.Frame(self.window, bg="#f5f2eb")
         bottom.pack(fill=tk.X, padx=24, pady=14)
         self.dialog_status = tk.StringVar(value="Changes stay on this computer in the ignored settings file.")
@@ -1963,7 +2038,7 @@ class SettingsDialog:
             anchor="w",
             fg="#64737a",
             bg="#f5f2eb",
-            font=("Segoe UI", 9),
+            font=ui_font(9),
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.save_button = tk.Button(
             bottom,
@@ -1976,7 +2051,7 @@ class SettingsDialog:
             relief=tk.FLAT,
             padx=14,
             pady=7,
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(9, "bold"),
         )
         self.save_button.pack(side=tk.RIGHT)
         tk.Button(
@@ -2002,7 +2077,7 @@ class SettingsDialog:
             parent,
             text=title,
             anchor="w",
-            font=("Segoe UI", 10, "bold"),
+            font=ui_font(10, "bold"),
             fg="#24373f",
             bg="#ffffff",
         ).grid(row=row, column=0, sticky="w", pady=(0, 6))
@@ -2089,7 +2164,7 @@ class SettingsDialog:
             whisper_row,
             text="Speech-to-text model (Whisper)",
             anchor="w",
-            font=("Segoe UI", 10, "bold"),
+            font=ui_font(10, "bold"),
             fg="#24373f",
             bg="#ffffff",
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
@@ -2131,7 +2206,7 @@ class SettingsDialog:
         tk.Label(
             voice_controls,
             text="Voice speed",
-            font=("Segoe UI", 10, "bold"),
+            font=ui_font(10, "bold"),
             fg="#24373f",
             bg="#ffffff",
         ).pack(side=tk.LEFT)
@@ -2153,6 +2228,36 @@ class SettingsDialog:
             pady=6,
         )
         self.preview_button.pack(side=tk.LEFT)
+
+    def _build_appearance_tab(self) -> None:
+        self._field(
+            self.appearance_tab,
+            0,
+            "Interface text size",
+            self.interface_scale_var,
+            list(FONT_SCALE_CHOICES),
+        )
+        tk.Label(
+            self.appearance_tab,
+            text=(
+                "Standard keeps the current size. Large and Extra large increase text throughout the main window, "
+                "conversation, buttons, menus, and Settings. The change applies immediately when you save."
+            ),
+            wraplength=650,
+            justify=tk.LEFT,
+            fg="#64737a",
+            bg="#ffffff",
+            font=ui_font(10),
+        ).grid(row=2, column=0, sticky="w", pady=(4, 18))
+        tk.Label(
+            self.appearance_tab,
+            text="Accessibility tip: the window remains resizable at every text size.",
+            wraplength=650,
+            justify=tk.LEFT,
+            fg="#0b756b",
+            bg="#ffffff",
+            font=ui_font(10, "bold"),
+        ).grid(row=3, column=0, sticky="w")
 
     def _whisper_labels(self) -> list[str]:
         installed = set(installed_whisper_models())
@@ -2315,6 +2420,7 @@ class SettingsDialog:
                 "voice_model": voice_model,
                 "voice": self.voice_by_label.get(self.voice_var.get(), "af_heart"),
                 "voice_speed": float(self.voice_speed_var.get()),
+                "interface_scale": FONT_SCALE_CHOICES.get(self.interface_scale_var.get(), 1.0),
             }
         )
         self.app.settings = updated
@@ -2327,8 +2433,10 @@ class SettingsDialog:
             voice_speed=float(updated["voice_speed"]),
         )
         save_settings(updated)
+        configure_ui_font_scale(self.app.root, float(updated["interface_scale"]))
+        self.app.root.update_idletasks()
         self.app._update_limits_label()
-        self.app.status.set("Settings saved. New audio routing and local models are active.")
+        self.app.status.set("Settings saved. Audio, models, voice, and interface size are active.")
         self.close()
 
     def close(self) -> None:
@@ -2367,7 +2475,7 @@ class SpeedSetupDialog:
         tk.Label(
             self.window,
             text="Conversation Speed Setup",
-            font=("Segoe UI", 18, "bold"),
+            font=ui_font(18, "bold"),
             fg="#102128",
             bg="#f5f2eb",
         ).pack(pady=(18, 6))
@@ -2400,7 +2508,7 @@ class SpeedSetupDialog:
             command=self.run_test,
             bg="#0d7c70",
             fg="#ffffff",
-            font=("Segoe UI", 11, "bold"),
+            font=ui_font(11, "bold"),
         )
         self.run_button.pack(fill=tk.X, padx=24, pady=16, ipady=7)
 
@@ -2429,7 +2537,7 @@ class SpeedSetupDialog:
             bg="#ffffff",
             fg="#26383f",
             relief=tk.FLAT,
-            font=("Segoe UI", 10),
+            font=ui_font(10),
         )
         self.results.pack(fill=tk.BOTH, expand=True, padx=24)
         self.results.insert(

@@ -11,6 +11,25 @@ import SolomonPocketAI as app
 
 
 class AudioSettingsTest(unittest.TestCase):
+    def test_interface_font_scale_is_bounded_and_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_file = Path(temporary) / "settings.json"
+            settings = dict(app.DEFAULT_SETTINGS)
+            settings["interface_scale"] = 1.3
+            with (
+                mock.patch.object(app, "SETTINGS_FILE", settings_file),
+                mock.patch.object(app, "ensure_local_layout"),
+            ):
+                app.save_settings(settings)
+                self.assertEqual(1.3, app.load_settings()["interface_scale"])
+                settings["interface_scale"] = 4.0
+                app.save_settings(settings)
+                self.assertEqual(1.0, app.load_settings()["interface_scale"])
+
+    def test_font_size_scaling_preserves_pixel_font_sign(self) -> None:
+        self.assertEqual(13, app._scaled_font_size(10, 1.3))
+        self.assertEqual(-13, app._scaled_font_size(-10, 1.3))
+
     def test_replay_cache_keeps_only_three_newest_responses(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             replay_root = Path(temporary)

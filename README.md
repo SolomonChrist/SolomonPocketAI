@@ -38,6 +38,7 @@ Open **Settings** in the main window to see and test the exact local stack:
 - Any conversation/thinking model already installed in Ollama.
 - Whisper speech-to-text size, with an in-app download button for additional supported models.
 - Installed Kokoro voice model, all 54 available voice styles, language/gender labels, and voice speed.
+- Standard, Large, and Extra Large interface text sizes that apply throughout the app and persist locally.
 
 The app adapts microphone sample rates and automatically resamples Kokoro audio for speakers that do not accept its native 24 kHz output. Audio choices are saved by device name and Windows audio backend rather than unstable device numbers. If a monitor, dock, headset, or speaker was just connected, click **Refresh devices**. If Windows has no active default speaker, Solomon Pocket AI prefers a device explicitly named **Speakers** and lets you test or override it.
 

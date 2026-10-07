@@ -43,6 +43,7 @@ OBSIDIAN_ROOT = DATA_ROOT / "ObsidianVault"
 MEMORY_FILE = OBSIDIAN_ROOT / "Solomon Pocket AI Memory.md"
 LEGACY_MEMORY_FILE = OBSIDIAN_ROOT / "Pocket AI Memory.md"
 MEMORY_ARCHIVE = OBSIDIAN_ROOT / "Memory Archive.md"
+REPLAY_ROOT = DATA_ROOT / "conversations" / "replay"
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 OLLAMA_MODEL = "qwen3.5:4b"
 WHISPER_MODEL_CHOICES = (
@@ -71,6 +72,9 @@ DEFAULT_SETTINGS = {
 MAX_ACTIVE_MEMORIES = 40
 MAX_MEMORY_CONTEXT_CHARS = 2_500
 MEMORY_LOCK = threading.RLock()
+REPLAY_LOCK = threading.RLock()
+MAX_REPLAY_RESPONSES = 3
+MAX_REPLAY_SAMPLES = 3_000_000
 PARTIAL_TRANSCRIPT_SECONDS = 2.0
 STREAMING_SPEECH_MIN_CHARS = 28
 STREAMING_SPEECH_MAX_CHARS = 120
@@ -95,6 +99,7 @@ def ensure_local_layout() -> None:
         "models/whisper",
         "models/kokoro",
         "conversations",
+        "conversations/replay",
         "notes",
         "outbox",
         "config",
@@ -383,6 +388,66 @@ def resample_audio(samples: np.ndarray, source_rate: int, target_rate: int) -> n
     source_positions = np.linspace(0.0, 1.0, num=flattened.size, endpoint=False)
     target_positions = np.linspace(0.0, 1.0, num=output_length, endpoint=False)
     return np.interp(target_positions, source_positions, flattened).astype(np.float32)
+
+
+def _replay_path(slot: int) -> Path:
+    return REPLAY_ROOT / f"response-{slot}.npz"
+
+
+def save_replay_response(text: str, samples: np.ndarray, sample_rate: int) -> None:
+    """Persist one bounded voice response, newest first, inside ignored runtime data."""
+    flattened = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if flattened.size == 0 or flattened.size > MAX_REPLAY_SAMPLES:
+        return
+    if not 8_000 <= int(sample_rate) <= 96_000:
+        return
+    REPLAY_ROOT.mkdir(parents=True, exist_ok=True)
+    with REPLAY_LOCK:
+        for slot in range(MAX_REPLAY_RESPONSES, 1, -1):
+            source = _replay_path(slot - 1)
+            destination = _replay_path(slot)
+            if source.is_file():
+                os.replace(source, destination)
+        temporary = REPLAY_ROOT / "response-new.tmp"
+        with temporary.open("wb") as handle:
+            np.savez_compressed(
+                handle,
+                text=np.asarray(text.strip()[:800]),
+                samples=flattened,
+                sample_rate=np.asarray(int(sample_rate), dtype=np.int32),
+            )
+        os.replace(temporary, _replay_path(1))
+
+
+def load_replay_responses() -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    with REPLAY_LOCK:
+        for slot in range(1, MAX_REPLAY_RESPONSES + 1):
+            path = _replay_path(slot)
+            if not path.is_file():
+                continue
+            try:
+                with np.load(path, allow_pickle=False) as archive:
+                    samples = np.asarray(archive["samples"], dtype=np.float32).reshape(-1)
+                    sample_rate = int(np.asarray(archive["sample_rate"]).item())
+                    text = str(np.asarray(archive["text"]).item()).strip()
+                if not text or samples.size == 0 or samples.size > MAX_REPLAY_SAMPLES:
+                    continue
+                if not 8_000 <= sample_rate <= 96_000:
+                    continue
+                items.append({"text": text, "samples": samples, "sample_rate": sample_rate})
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+    return items
+
+
+def clear_replay_responses() -> None:
+    with REPLAY_LOCK:
+        for slot in range(1, MAX_REPLAY_RESPONSES + 1):
+            try:
+                _replay_path(slot).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def installed_ollama_models() -> list[str]:
@@ -799,6 +864,8 @@ class StreamingSpeech:
         self.first_audio_seconds: float | None = None
         self.buffer = ""
         self.stopped = threading.Event()
+        self.audio_segments: list[np.ndarray] = []
+        self.audio_sample_rate: int | None = None
         self.phrases: queue.Queue[object] = queue.Queue()
         self.worker = threading.Thread(target=self._run, daemon=True)
         self.worker.start()
@@ -849,6 +916,11 @@ class StreamingSpeech:
         self.engines.stop_speaking()
         self.phrases.put(self._END)
 
+    def captured_audio(self) -> tuple[np.ndarray, int] | None:
+        if self.stopped.is_set() or not self.audio_segments or self.audio_sample_rate is None:
+            return None
+        return np.concatenate(self.audio_segments), self.audio_sample_rate
+
     def _run(self) -> None:
         while True:
             phrase = self.phrases.get()
@@ -859,6 +931,10 @@ class StreamingSpeech:
             samples, sample_rate = self.engines.synthesize(str(phrase))
             if self.stopped.is_set():
                 continue
+            if self.audio_sample_rate is None:
+                self.audio_sample_rate = sample_rate
+            if sample_rate == self.audio_sample_rate:
+                self.audio_segments.append(np.asarray(samples, dtype=np.float32).reshape(-1).copy())
             if self.first_audio_seconds is None:
                 self.first_audio_seconds = time.monotonic() - self.started
             self.engines.play(samples, sample_rate)
@@ -879,6 +955,7 @@ class SolomonPocketAIApp:
         )
         self.tools = SolomonPocketTools(DATA_ROOT)
         self.messages = self._load_session()
+        self.replay_items = load_replay_responses()
         self.recording = False
         self.recording_started = 0.0
         self.recording_sample_rate = SAMPLE_RATE
@@ -991,6 +1068,27 @@ class SolomonPocketAIApp:
         self.transcript.tag_configure("assistant_name", foreground="#102128", font=("Segoe UI", 10, "bold"))
         self.transcript.tag_configure("message", foreground="#2d3d44", spacing3=10)
         self.transcript.configure(state=tk.DISABLED)
+
+        replay_bar = tk.Frame(root, bg="#f5f2eb")
+        replay_bar.pack(fill=tk.X, padx=24, pady=(0, 8))
+        tk.Label(
+            replay_bar,
+            text="Replay voice:",
+            font=("Segoe UI", 9, "bold"),
+            fg="#40545c",
+            bg="#f5f2eb",
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        replay_labels = ("Latest", "Previous", "Earlier")
+        self.replay_buttons: list[tk.Button] = []
+        for index, label in enumerate(replay_labels):
+            button = self._secondary_button(
+                replay_bar,
+                f"▶ {label}",
+                lambda replay_index=index: self.replay_response(replay_index),
+            )
+            button.pack(side=tk.LEFT, padx=(0, 6))
+            self.replay_buttons.append(button)
+        self._update_replay_buttons()
 
         entry_row = tk.Frame(root, bg="#f5f2eb")
         entry_row.pack(fill=tk.X, padx=24)
@@ -1181,6 +1279,36 @@ class SolomonPocketAIApp:
         self.speed_button.configure(state=state)
         if not self.recording:
             self.talk_button.configure(state=state)
+        self._update_replay_buttons()
+
+    def _update_replay_buttons(self) -> None:
+        if not hasattr(self, "replay_buttons"):
+            return
+        for index, button in enumerate(self.replay_buttons):
+            available = index < len(self.replay_items) and not self.busy and not self.recording
+            button.configure(state=tk.NORMAL if available else tk.DISABLED)
+
+    def replay_response(self, index: int) -> None:
+        if self.busy or self.recording or not 0 <= index < len(self.replay_items):
+            return
+        item = self.replay_items[index]
+        samples = np.asarray(item["samples"], dtype=np.float32).copy()
+        sample_rate = int(item["sample_rate"])
+        summary = re.sub(r"\s+", " ", str(item["text"])).strip()
+        if len(summary) > 70:
+            summary = summary[:67].rstrip() + "…"
+        self.stop_voice()
+        self._set_busy(True)
+        self.status.set(f"Replaying: {summary}")
+
+        def worker() -> None:
+            try:
+                self.engines.play(samples, sample_rate)
+                self.ui_events.put(("idle", "Ready — replay finished."))
+            except Exception as exc:
+                self.ui_events.put(("error", f"Replay failed: {exc}"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def send_typed(self) -> None:
         if self.busy or self.recording:
@@ -1223,12 +1351,14 @@ class SolomonPocketAIApp:
                 callback=callback,
             )
             self.recording = True
+            self._update_replay_buttons()
             self.recording_started = time.monotonic()
             self.input_stream.start()
             self.talk_button.configure(text="Stop and send", bg="#f06a72")
             self._recording_tick()
         except Exception as exc:
             self.recording = False
+            self._update_replay_buttons()
             messagebox.showerror("Microphone error", str(exc))
 
     def _recording_tick(self) -> None:
@@ -1259,6 +1389,7 @@ class SolomonPocketAIApp:
 
     def _stop_recording(self) -> None:
         self.recording = False
+        self._update_replay_buttons()
         if self.input_stream is not None:
             self.input_stream.stop()
             self.input_stream.close()
@@ -1353,7 +1484,16 @@ class SolomonPocketAIApp:
         self.status.set(status)
         self._set_busy(False)
         if speak:
-            threading.Thread(target=self.engines.speak, args=(response,), daemon=True).start()
+            threading.Thread(target=self._speak_direct_response, args=(response,), daemon=True).start()
+
+    def _speak_direct_response(self, response: str) -> None:
+        try:
+            samples, sample_rate = self.engines.synthesize(response)
+            self.engines.play(samples, sample_rate)
+            save_replay_response(response, samples, sample_rate)
+            self.ui_events.put(("replay_ready", None))
+        except Exception as exc:
+            self.ui_events.put(("status", f"Voice output failed: {exc}"))
 
     def _detect_tool_action(self, text: str) -> tuple[str, str] | None:
         stripped = text.strip()
@@ -1536,6 +1676,11 @@ class SolomonPocketAIApp:
             if likely_memory_statement(text):
                 threading.Thread(target=self._remember_from_turn, args=(text,), daemon=True).start()
             voice_timing = speaker.finish()
+            captured = speaker.captured_audio()
+            if captured is not None:
+                replay_samples, replay_rate = captured
+                save_replay_response(response, replay_samples, replay_rate)
+                self.ui_events.put(("replay_ready", None))
             pieces = []
             if transcription_seconds is not None:
                 pieces.append(f"speech {transcription_seconds:.1f}s")
@@ -1598,6 +1743,9 @@ class SolomonPocketAIApp:
                     self.entry.focus_set()
                 elif event == "memory_saved":
                     self.status.set(f"Saved to local Markdown memory: {value}")
+                elif event == "replay_ready":
+                    self.replay_items = load_replay_responses()
+                    self._update_replay_buttons()
                 elif event == "live_transcript":
                     self.live_partial_text = str(value)
                 elif event == "prefill_ready":
@@ -1622,6 +1770,9 @@ class SolomonPocketAIApp:
             return
         self.messages = []
         self._save_session()
+        clear_replay_responses()
+        self.replay_items = []
+        self._update_replay_buttons()
         self.transcript.configure(state=tk.NORMAL)
         self.transcript.delete("1.0", tk.END)
         self.transcript.configure(state=tk.DISABLED)

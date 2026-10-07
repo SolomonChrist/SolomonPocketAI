@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
@@ -9,6 +11,33 @@ import SolomonPocketAI as app
 
 
 class AudioSettingsTest(unittest.TestCase):
+    def test_replay_cache_keeps_only_three_newest_responses(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            replay_root = Path(temporary)
+            with mock.patch.object(app, "REPLAY_ROOT", replay_root):
+                for number in range(1, 5):
+                    app.save_replay_response(
+                        f"Response {number}",
+                        np.full(240, number, dtype=np.float32),
+                        24_000,
+                    )
+                items = app.load_replay_responses()
+        self.assertEqual(["Response 4", "Response 3", "Response 2"], [item["text"] for item in items])
+        self.assertEqual(3, len(items))
+
+    def test_streaming_speech_captures_original_audio_for_replay(self) -> None:
+        engines = mock.Mock()
+        engines.synthesize.return_value = (np.ones(240, dtype=np.float32), 24_000)
+        speaker = app.StreamingSpeech(engines)
+        speaker.feed("This short answer should be replayable.")
+        speaker.finish()
+        captured = speaker.captured_audio()
+        self.assertIsNotNone(captured)
+        samples, sample_rate = captured
+        self.assertEqual(240, samples.size)
+        self.assertEqual(24_000, sample_rate)
+        engines.play.assert_called_once()
+
     def test_chinese_voice_uses_mandarin_code_and_preview(self) -> None:
         self.assertEqual("cmn", app.voice_language("zf_xiaoni"))
         preview = app.voice_preview_text("zf_xiaoni")

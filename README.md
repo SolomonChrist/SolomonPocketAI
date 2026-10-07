@@ -24,6 +24,7 @@ Setup creates an isolated Python environment, installs Ollama if needed, downloa
 
 - Hold private spoken or typed conversations using `qwen3.5:4b` through local Ollama.
 - Transcribe microphone input with local Whisper and speak answers with local Kokoro.
+- Replay the three most recent spoken responses instantly from the local audio cache.
 - Keep short Obsidian-compatible Markdown memory.
 - Import and read bounded TXT, Markdown, JSON, CSV, PDF, PNG, JPEG, and WebP files.
 - Capture one camera frame only when you press the camera action or explicitly ask.
@@ -43,6 +44,8 @@ The app adapts microphone sample rates and automatically resamples Kokoro audio 
 ## Privacy boundary
 
 Runtime files live only in `SolomonPocketAIData/`, and Git ignores that entire directory. The model cannot browse arbitrary files, execute shell commands, or continuously access the camera. Files must be selected by you and are copied into its protected workspace before use.
+
+The three-response replay cache also stays inside `SolomonPocketAIData/`. It rotates automatically and is erased when you clear the conversation.
 
 Weather and current-fact requests are the only optional online app features. Everything else continues to work offline after setup. See [PRIVACY.md](PRIVACY.md) for the exact boundary.
 

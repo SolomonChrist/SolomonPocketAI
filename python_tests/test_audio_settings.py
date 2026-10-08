@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import tempfile
+import queue
 import threading
 from types import SimpleNamespace
 from pathlib import Path
@@ -65,6 +66,21 @@ class AudioSettingsTest(unittest.TestCase):
                 app.save_settings(settings)
                 self.assertEqual(str(trusted_folder), app.load_settings()["trusted_folder"])
 
+    def test_english_and_mandarin_voices_are_persisted_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_file = Path(temporary) / "settings.json"
+            settings = dict(app.DEFAULT_SETTINGS)
+            settings["voice"] = "am_michael"
+            settings["mandarin_voice"] = "zm_yunxi"
+            with (
+                mock.patch.object(app, "SETTINGS_FILE", settings_file),
+                mock.patch.object(app, "ensure_local_layout"),
+            ):
+                app.save_settings(settings)
+                loaded = app.load_settings()
+        self.assertEqual("am_michael", loaded["voice"])
+        self.assertEqual("zm_yunxi", loaded["mandarin_voice"])
+
     def test_font_size_scaling_preserves_pixel_font_sign(self) -> None:
         self.assertEqual(13, app._scaled_font_size(10, 1.3))
         self.assertEqual(-13, app._scaled_font_size(-10, 1.3))
@@ -109,7 +125,7 @@ class AudioSettingsTest(unittest.TestCase):
         def synthesize(text: str) -> tuple[np.ndarray, int]:
             if text.startswith("Second"):
                 second_phrase_ready.set()
-            return np.ones(4_800, dtype=np.float32), 24_000
+            return np.ones(240, dtype=np.float32), 24_000
 
         def observe_first_write(write_number: int) -> None:
             if write_number == 1:
@@ -130,10 +146,108 @@ class AudioSettingsTest(unittest.TestCase):
         self.assertEqual(2, len(stream.writes))
         engines.open_output_stream.assert_called_once_with(24_000)
 
+    def test_streaming_speech_stop_aborts_within_one_small_audio_block(self) -> None:
+        engines = mock.Mock()
+        engines.synthesize.return_value = (np.ones(12_000, dtype=np.float32), 24_000)
+        first_write_started = threading.Event()
+        release_first_write = threading.Event()
+
+        def block_first_write(write_number: int) -> None:
+            if write_number == 1:
+                first_write_started.set()
+                release_first_write.wait(timeout=1.0)
+
+        stream = self._FakeOutputStream(on_write=block_first_write)
+        engines.open_output_stream.return_value = (stream, 24_000)
+        speaker = app.StreamingSpeech(engines)
+        speaker.feed("This response has enough audio to require several playback blocks.")
+        self.assertTrue(first_write_started.wait(timeout=1.0))
+        speaker.stop()
+        release_first_write.set()
+        speaker.finish()
+
+        self.assertEqual(1, len(stream.writes))
+        self.assertTrue(stream.aborted)
+        self.assertTrue(stream.closed)
+        self.assertIsNone(speaker.captured_audio())
+
+    def test_stop_voice_is_repeatable_and_stops_all_playback_paths(self) -> None:
+        speaker = mock.Mock()
+        engines = mock.Mock()
+        status = mock.Mock()
+        fake_app = SimpleNamespace(
+            voice_generation=3,
+            active_speaker=speaker,
+            engines=engines,
+            status=status,
+        )
+
+        app.SolomonPocketAIApp.stop_voice(fake_app)
+        app.SolomonPocketAIApp.stop_voice(fake_app)
+
+        self.assertEqual(5, fake_app.voice_generation)
+        self.assertEqual(2, speaker.stop.call_count)
+        self.assertEqual(2, engines.stop_speaking.call_count)
+        self.assertEqual(2, status.set.call_count)
+
+    def test_stopped_direct_voice_does_not_begin_after_synthesis(self) -> None:
+        engines = mock.Mock()
+        fake_app = SimpleNamespace(
+            voice_generation=9,
+            engines=engines,
+            ui_events=queue.Queue(),
+        )
+
+        def finish_after_stop(_text: str) -> tuple[np.ndarray, int]:
+            fake_app.voice_generation += 1
+            return np.ones(240, dtype=np.float32), 24_000
+
+        engines.synthesize.side_effect = finish_after_stop
+        app.SolomonPocketAIApp._speak_direct_response(fake_app, "Hello.", 9)
+
+        engines.play.assert_not_called()
+        self.assertTrue(fake_app.ui_events.empty())
+
+    def test_mandarin_punctuation_streams_complete_phrases(self) -> None:
+        engines = mock.Mock()
+        engines.synthesize.return_value = (np.ones(240, dtype=np.float32), 24_000)
+        stream = self._FakeOutputStream()
+        engines.open_output_stream.return_value = (stream, 24_000)
+        speaker = app.StreamingSpeech(engines)
+        speaker.feed("你好，我可以使用普通话回答问题。接下来这句话也会连续播放。")
+        speaker.finish()
+
+        phrases = [call.args[0] for call in engines.synthesize.call_args_list]
+        self.assertEqual(
+            ["你好，我可以使用普通话回答问题。", "接下来这句话也会连续播放。"],
+            phrases,
+        )
+
     def test_chinese_voice_uses_mandarin_code_and_preview(self) -> None:
         self.assertEqual("cmn", app.voice_language("zf_xiaoni"))
         preview = app.voice_preview_text("zf_xiaoni")
         self.assertIn("中文语音测试", preview)
+
+    def test_response_text_routes_to_english_or_mandarin_voice(self) -> None:
+        self.assertEqual("en", app.spoken_language_for_text("Hello, how can I help you today?"))
+        self.assertEqual("zh", app.spoken_language_for_text("你好，我可以用普通话回答你的问题。"))
+        self.assertEqual("en", app.spoken_language_for_text("The Chinese greeting 你好 means hello."))
+
+        kokoro = mock.Mock()
+        kokoro.create.return_value = (np.ones(240, dtype=np.float32), 24_000)
+        engine = app.VoiceEngines(voice="af_heart", mandarin_voice="zf_xiaoni")
+        engine._zh_g2p = mock.Mock(return_value=("mandarin phonemes", []))
+        with mock.patch.object(engine, "load_kokoro", return_value=kokoro):
+            engine.synthesize("Hello, Solomon.")
+            engine.synthesize("你好，我会说普通话。")
+
+        english_call, mandarin_call = kokoro.create.call_args_list
+        self.assertEqual("af_heart", english_call.kwargs["voice"])
+        self.assertEqual("en-us", english_call.kwargs["lang"])
+        self.assertFalse(english_call.kwargs["is_phonemes"])
+        self.assertEqual("zf_xiaoni", mandarin_call.kwargs["voice"])
+        self.assertEqual("cmn", mandarin_call.kwargs["lang"])
+        self.assertTrue(mandarin_call.kwargs["is_phonemes"])
 
     def test_microphone_transcription_detects_english_or_mandarin(self) -> None:
         audio = np.ones(app.SAMPLE_RATE, dtype=np.float32) * 0.1

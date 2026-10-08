@@ -73,6 +73,7 @@ DEFAULT_SETTINGS = {
     "whisper_model": "tiny",
     "voice_model": KOKORO_MODEL.name,
     "voice": "af_heart",
+    "mandarin_voice": "zf_xiaoni",
     "voice_speed": 1.0,
     "interface_scale": 1.0,
     "trusted_folder": None,
@@ -86,6 +87,7 @@ MAX_REPLAY_SAMPLES = 3_000_000
 PARTIAL_TRANSCRIPT_SECONDS = 2.0
 STREAMING_SPEECH_MIN_CHARS = 28
 STREAMING_SPEECH_MAX_CHARS = 120
+PLAYBACK_CANCEL_BLOCK_SECONDS = 0.05
 UI_FONT_ROOT: tk.Misc | None = None
 UI_FONT_SCALE = 1.0
 UI_FONTS: dict[tuple[int, str], tkfont.Font] = {}
@@ -315,7 +317,7 @@ def load_settings() -> dict[str, object]:
         candidate = loaded.get(key)
         if isinstance(candidate, str) and candidate.strip():
             settings[key] = candidate.strip()
-    for key in ("language_model", "whisper_model", "voice_model", "voice"):
+    for key in ("language_model", "whisper_model", "voice_model", "voice", "mandarin_voice"):
         candidate = loaded.get(key)
         if isinstance(candidate, str) and candidate.strip():
             settings[key] = candidate.strip()
@@ -339,7 +341,7 @@ def save_settings(settings: dict[str, object]) -> None:
     for key in ("input_device", "output_device"):
         candidate = settings.get(key)
         clean[key] = candidate.strip() if isinstance(candidate, str) and candidate.strip() else None
-    for key in ("language_model", "whisper_model", "voice_model", "voice"):
+    for key in ("language_model", "whisper_model", "voice_model", "voice", "mandarin_voice"):
         candidate = settings.get(key)
         clean[key] = str(candidate).strip() if isinstance(candidate, str) and candidate.strip() else DEFAULT_SETTINGS[key]
     candidate_speed = settings.get("voice_speed")
@@ -585,6 +587,17 @@ def voice_preview_text(voice: str) -> str:
     return "This is the selected Solomon Pocket AI voice and speaker output."
 
 
+def cjk_character_count(text: str) -> int:
+    return len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", text))
+
+
+def spoken_language_for_text(text: str) -> str:
+    """Choose Mandarin only when CJK is a substantial part of the phrase."""
+    cjk_count = cjk_character_count(text)
+    latin_count = len(re.findall(r"[A-Za-z]", text))
+    return "zh" if cjk_count >= 2 and cjk_count * 2 >= latin_count else "en"
+
+
 def build_turn_prompt(reply_seconds: int) -> str:
     reply_seconds = reply_seconds if reply_seconds in VALID_SECONDS else DEFAULT_SETTINGS["max_reply_seconds"]
     target_words = max(10, round(reply_seconds * 2.4))
@@ -631,7 +644,7 @@ def substantial_partial_transcript(text: str) -> bool:
     """Accept a short English phrase or four CJK characters for prefill."""
     if len(text.split()) >= 3:
         return True
-    return len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", text)) >= 4
+    return cjk_character_count(text) >= 4
 
 
 def ollama_chat_stream(
@@ -832,6 +845,7 @@ class VoiceEngines:
         whisper_model: str = "tiny",
         voice_model: str = KOKORO_MODEL.name,
         voice: str = "af_heart",
+        mandarin_voice: str = "zf_xiaoni",
         voice_speed: float = 1.0,
     ) -> None:
         self._whisper = None
@@ -843,6 +857,7 @@ class VoiceEngines:
         self.whisper_model = whisper_model
         self.voice_model = voice_model
         self.voice = voice
+        self.mandarin_voice = mandarin_voice
         self.voice_speed = voice_speed
 
     def load_whisper(self):
@@ -914,9 +929,10 @@ class VoiceEngines:
 
     def synthesize(self, text: str) -> tuple[np.ndarray, int]:
         kokoro = self.load_kokoro()
+        selected_voice = self.mandarin_voice if spoken_language_for_text(text) == "zh" else self.voice
         is_phonemes = False
         speech_text = text[:1800]
-        if self.voice.startswith("z"):
+        if selected_voice.startswith("z"):
             if self._zh_g2p is None:
                 from misaki import zh
 
@@ -928,9 +944,9 @@ class VoiceEngines:
             is_phonemes = True
         samples, sample_rate = kokoro.create(
             speech_text,
-            voice=self.voice,
+            voice=selected_voice,
             speed=self.voice_speed,
-            lang=voice_language(self.voice),
+            lang=voice_language(selected_voice),
             is_phonemes=is_phonemes,
         )
         return np.asarray(samples, dtype=np.float32), int(sample_rate)
@@ -993,6 +1009,7 @@ class VoiceEngines:
         whisper_model: str,
         voice_model: str,
         voice: str,
+        mandarin_voice: str,
         voice_speed: float,
     ) -> None:
         self.stop_speaking()
@@ -1003,6 +1020,7 @@ class VoiceEngines:
             self._kokoro = None
             self.voice_model = voice_model
         self.voice = voice
+        self.mandarin_voice = mandarin_voice
         self.voice_speed = voice_speed
         self.output_device = output_device
 
@@ -1046,20 +1064,29 @@ class StreamingSpeech:
             self.phrases.put(phrase)
 
     def _take_ready_phrase(self) -> str:
-        if len(self.buffer) < STREAMING_SPEECH_MIN_CHARS:
+        cjk_count = cjk_character_count(self.buffer)
+        if len(self.buffer) < STREAMING_SPEECH_MIN_CHARS and cjk_count < 12:
             return ""
-        for match in re.finditer(r"[.!?;:](?:\s+|$)|,(?:\s+|$)", self.buffer):
+        for match in re.finditer(
+            r"[.!?;:](?:\s+|$)|[。！？；：]|,(?:\s+|$)|，",
+            self.buffer,
+        ):
             candidate = self.buffer[: match.end()].strip()
             words = len(candidate.split())
             punctuation = self.buffer[match.start()]
-            if words >= 5 and (punctuation != "," or words >= 8):
+            candidate_cjk = cjk_character_count(candidate)
+            enough_content = words >= 5 or candidate_cjk >= 8
+            enough_for_comma = punctuation not in ",，" or words >= 8 or candidate_cjk >= 14
+            if enough_content and enough_for_comma:
                 self.buffer = self.buffer[match.end() :].lstrip()
                 return candidate
         if len(self.buffer) >= STREAMING_SPEECH_MAX_CHARS:
             cut = self.buffer.rfind(" ", STREAMING_SPEECH_MIN_CHARS, STREAMING_SPEECH_MAX_CHARS)
+            if cut <= 0 and cjk_count >= 12:
+                cut = STREAMING_SPEECH_MAX_CHARS
             if cut > 0:
                 candidate = self.buffer[:cut].strip()
-                self.buffer = self.buffer[cut + 1 :].lstrip()
+                self.buffer = self.buffer[cut + (1 if self.buffer[cut:cut + 1].isspace() else 0) :].lstrip()
                 return candidate
         return ""
 
@@ -1143,7 +1170,12 @@ class StreamingSpeech:
                 if self.first_audio_seconds is None:
                     self.first_audio_seconds = time.monotonic() - self.started
                 playback_samples = resample_audio(samples, sample_rate, playback_rate)
-                stream.write(playback_samples.reshape(-1, 1))
+                block_frames = max(1, round(playback_rate * PLAYBACK_CANCEL_BLOCK_SECONDS))
+                for offset in range(0, playback_samples.size, block_frames):
+                    if self.stopped.is_set():
+                        return
+                    block = playback_samples[offset : offset + block_frames]
+                    stream.write(block.reshape(-1, 1))
         except Exception as exc:
             if not self.stopped.is_set():
                 self.failure = exc
@@ -1177,6 +1209,7 @@ class SolomonPocketAIApp:
             whisper_model=str(self.settings.get("whisper_model", "tiny")),
             voice_model=str(self.settings.get("voice_model", KOKORO_MODEL.name)),
             voice=str(self.settings.get("voice", "af_heart")),
+            mandarin_voice=str(self.settings.get("mandarin_voice", "zf_xiaoni")),
             voice_speed=float(self.settings.get("voice_speed", 1.0)),
         )
         self.tools_startup_warning = ""
@@ -1198,6 +1231,7 @@ class SolomonPocketAIApp:
         self.partial_started = False
         self.live_partial_text = ""
         self.active_speaker: StreamingSpeech | None = None
+        self.voice_generation = 0
         self.busy = False
         self.ui_events: queue.Queue[tuple[str, object]] = queue.Queue()
 
@@ -1494,7 +1528,8 @@ class SolomonPocketAIApp:
         self.subtitle.configure(
             text=(
                 f"{OLLAMA_MODEL}  •  Whisper {self.settings.get('whisper_model', 'tiny')}  •  "
-                f"Kokoro {self.settings.get('voice', 'af_heart')}  •  "
+                f"Kokoro EN {self.settings.get('voice', 'af_heart')} / "
+                f"ZH {self.settings.get('mandarin_voice', 'zf_xiaoni')}  •  "
                 f"input ≤ {self.settings['max_input_seconds']}s  •  "
                 f"reply ≈ {self.settings['max_reply_seconds']}s"
             )
@@ -1533,13 +1568,17 @@ class SolomonPocketAIApp:
         if len(summary) > 70:
             summary = summary[:67].rstrip() + "…"
         self.stop_voice()
+        voice_generation = self.voice_generation
         self._set_busy(True)
         self.status.set(f"Replaying: {summary}")
 
         def worker() -> None:
             try:
+                if voice_generation != self.voice_generation:
+                    return
                 self.engines.play(samples, sample_rate)
-                self.ui_events.put(("idle", "Ready — replay finished."))
+                if voice_generation == self.voice_generation:
+                    self.ui_events.put(("idle", "Ready — replay finished."))
             except Exception as exc:
                 self.ui_events.put(("error", f"Replay failed: {exc}"))
 
@@ -1719,12 +1758,21 @@ class SolomonPocketAIApp:
         self.status.set(status)
         self._set_busy(False)
         if speak:
-            threading.Thread(target=self._speak_direct_response, args=(response,), daemon=True).start()
+            voice_generation = self.voice_generation
+            threading.Thread(
+                target=self._speak_direct_response,
+                args=(response, voice_generation),
+                daemon=True,
+            ).start()
 
-    def _speak_direct_response(self, response: str) -> None:
+    def _speak_direct_response(self, response: str, voice_generation: int) -> None:
         try:
             samples, sample_rate = self.engines.synthesize(response)
+            if voice_generation != self.voice_generation:
+                return
             self.engines.play(samples, sample_rate)
+            if voice_generation != self.voice_generation:
+                return
             save_replay_response(response, samples, sample_rate)
             self.ui_events.put(("replay_ready", None))
         except Exception as exc:
@@ -1997,10 +2045,11 @@ class SolomonPocketAIApp:
                 self.active_speaker = None
 
     def stop_voice(self) -> None:
+        self.voice_generation += 1
         if self.active_speaker is not None:
             self.active_speaker.stop()
-        else:
-            self.engines.stop_speaking()
+        self.engines.stop_speaking()
+        self.status.set("Voice stopped.")
 
     def _remember_from_turn(self, user_text: str) -> None:
         fact = extract_memory_fact(user_text)
@@ -2260,7 +2309,10 @@ class SettingsDialog:
         self.voice_model_var = tk.StringVar(value=current_voice_model)
 
         self.voice_names = installed_voice_names()
-        self.voice_by_label = {voice_display_name(name): name for name in self.voice_names}
+        english_names = [name for name in self.voice_names if name.startswith(("a", "b"))]
+        mandarin_names = [name for name in self.voice_names if name.startswith("z")]
+        self.voice_by_label = {voice_display_name(name): name for name in english_names}
+        self.mandarin_voice_by_label = {voice_display_name(name): name for name in mandarin_names}
         current_voice = str(app.settings.get("voice", "af_heart"))
         current_voice_label = next(
             (label for label, name in self.voice_by_label.items() if name == current_voice),
@@ -2269,6 +2321,14 @@ class SettingsDialog:
         if current_voice_label not in self.voice_by_label:
             self.voice_by_label[current_voice_label] = current_voice
         self.voice_var = tk.StringVar(value=current_voice_label)
+        current_mandarin_voice = str(app.settings.get("mandarin_voice", "zf_xiaoni"))
+        current_mandarin_label = next(
+            (label for label, name in self.mandarin_voice_by_label.items() if name == current_mandarin_voice),
+            voice_display_name(current_mandarin_voice),
+        )
+        if current_mandarin_label not in self.mandarin_voice_by_label:
+            self.mandarin_voice_by_label[current_mandarin_label] = current_mandarin_voice
+        self.mandarin_voice_var = tk.StringVar(value=current_mandarin_label)
         self.voice_speed_var = tk.StringVar(value=f"{float(app.settings.get('voice_speed', 1.0)):.2f}")
         self._build_models_tab()
 
@@ -2450,12 +2510,19 @@ class SettingsDialog:
         self._field(
             self.models_tab,
             5,
-            "Voice style",
+            "English response voice",
             self.voice_var,
             list(self.voice_by_label),
         )
+        self._field(
+            self.models_tab,
+            7,
+            "Mandarin response voice",
+            self.mandarin_voice_var,
+            list(self.mandarin_voice_by_label),
+        )
         voice_controls = tk.Frame(self.models_tab, bg="#ffffff")
-        voice_controls.grid(row=7, column=0, sticky="ew")
+        voice_controls.grid(row=9, column=0, sticky="ew")
         tk.Label(
             voice_controls,
             text="Voice speed",
@@ -2472,8 +2539,8 @@ class SettingsDialog:
         ).pack(side=tk.LEFT, padx=(8, 16))
         self.preview_button = tk.Button(
             voice_controls,
-            text="Preview selected voice",
-            command=self.test_speaker,
+            text="Preview English",
+            command=lambda: self.test_speaker("en"),
             bg="#0d7c70",
             fg="#ffffff",
             relief=tk.FLAT,
@@ -2481,6 +2548,17 @@ class SettingsDialog:
             pady=6,
         )
         self.preview_button.pack(side=tk.LEFT)
+        self.mandarin_preview_button = tk.Button(
+            voice_controls,
+            text="Preview Mandarin",
+            command=lambda: self.test_speaker("zh"),
+            bg="#0d7c70",
+            fg="#ffffff",
+            relief=tk.FLAT,
+            padx=12,
+            pady=6,
+        )
+        self.mandarin_preview_button.pack(side=tk.LEFT, padx=(8, 0))
 
     def _build_appearance_tab(self) -> None:
         self._field(
@@ -2623,6 +2701,7 @@ class SettingsDialog:
             self.speaker_test_button,
             self.download_whisper_button,
             self.preview_button,
+            self.mandarin_preview_button,
             self.choose_folder_button,
             self.use_app_folder_button,
             self.save_button,
@@ -2686,11 +2765,14 @@ class SettingsDialog:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def test_speaker(self) -> None:
+    def test_speaker(self, language: str = "en") -> None:
         if self.busy:
             return
         output_device = self.output_by_label.get(self.output_var.get())
-        voice = self.voice_by_label.get(self.voice_var.get(), "af_heart")
+        if language == "zh":
+            voice = self.mandarin_voice_by_label.get(self.mandarin_voice_var.get(), "zf_xiaoni")
+        else:
+            voice = self.voice_by_label.get(self.voice_var.get(), "af_heart")
         voice_model = self.voice_model_var.get()
         voice_speed = float(self.voice_speed_var.get())
         self._set_busy(True, "Generating and playing the selected local voice...")
@@ -2701,6 +2783,7 @@ class SettingsDialog:
                     output_device=output_device,
                     voice_model=voice_model,
                     voice=voice,
+                    mandarin_voice=voice,
                     voice_speed=voice_speed,
                 )
                 preview_engine.speak(voice_preview_text(voice))
@@ -2777,6 +2860,9 @@ class SettingsDialog:
                 "whisper_model": whisper_model,
                 "voice_model": voice_model,
                 "voice": self.voice_by_label.get(self.voice_var.get(), "af_heart"),
+                "mandarin_voice": self.mandarin_voice_by_label.get(
+                    self.mandarin_voice_var.get(), "zf_xiaoni"
+                ),
                 "voice_speed": float(self.voice_speed_var.get()),
                 "interface_scale": FONT_SCALE_CHOICES.get(self.interface_scale_var.get(), 1.0),
                 "trusted_folder": str(updated_tools.trusted_root) if updated_tools.trusted_root else None,
@@ -2790,6 +2876,7 @@ class SettingsDialog:
             whisper_model=str(updated["whisper_model"]),
             voice_model=str(updated["voice_model"]),
             voice=str(updated["voice"]),
+            mandarin_voice=str(updated["mandarin_voice"]),
             voice_speed=float(updated["voice_speed"]),
         )
         save_settings(updated)

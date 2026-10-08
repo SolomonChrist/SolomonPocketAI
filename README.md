@@ -27,8 +27,9 @@ Setup installs or verifies Git, the tested Python 3.11 runtime, all packages in 
 ## What it can do
 
 - Hold private spoken or typed conversations using `qwen3.5:4b` through local Ollama.
-- Detect and transcribe English or Mandarin microphone input with local Whisper, and speak answers with local Kokoro.
+- Detect and transcribe English or Mandarin microphone input with local Whisper, then automatically speak each answer with the matching local Kokoro voice.
 - Stream speech through one continuous audio connection while the next phrase renders ahead, avoiding stop-and-restart gaps between generated sentences.
+- Stop active or queued speech immediately with **Stop voice**.
 - Replay the three most recent spoken responses instantly from the local audio cache.
 - Keep short Obsidian-compatible Markdown memory.
 - Import and read bounded TXT, Markdown, JSON, CSV, PDF, PNG, JPEG, and WebP files.
@@ -42,7 +43,7 @@ Open **Settings** in the main window to see and test the exact local stack:
 - Microphone input and speaker output, including device refresh, a two-second microphone meter, and a spoken speaker test.
 - Any conversation/thinking model already installed in Ollama.
 - Whisper speech-to-text size, with an in-app download button for additional supported models.
-- Installed Kokoro voice model, all 54 available voice styles, language/gender labels, and voice speed.
+- Installed Kokoro voice model, separate English and Mandarin response-voice selectors with previews, language/gender labels, and voice speed.
 - Standard, Large, and Extra Large interface text sizes that apply throughout the app and persist locally.
 - An optional single trusted folder that replaces the private app workspace as the only file area the assistant can use.
 

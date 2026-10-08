@@ -928,6 +928,34 @@ class VoiceEngines:
             playback_samples = resample_audio(samples, sample_rate, playback_rate)
             sd.play(playback_samples, playback_rate, blocking=True, device=device)
 
+    def open_output_stream(self, sample_rate: int):
+        """Open one persistent mono stream, retrying after device refresh."""
+        selected = self.output_device
+        last_error: Exception | None = None
+        for refresh in (False, True):
+            stream = None
+            try:
+                device = resolve_output_device(selected, refresh=refresh)
+                playback_rate = supported_audio_rate("output", device, sample_rate)
+                stream = sd.OutputStream(
+                    samplerate=playback_rate,
+                    channels=1,
+                    dtype="float32",
+                    device=device,
+                )
+                stream.start()
+                return stream, playback_rate
+            except Exception as exc:
+                last_error = exc
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No speaker output stream is available.")
+
     def set_output_device(self, output_device: str | None) -> None:
         self.stop_speaking()
         self.output_device = output_device
@@ -958,7 +986,7 @@ class VoiceEngines:
 
 
 class StreamingSpeech:
-    """Turn streamed model text into spoken phrases before the answer finishes."""
+    """Synthesize ahead and feed one continuous stream while text arrives."""
 
     _END = object()
 
@@ -971,8 +999,15 @@ class StreamingSpeech:
         self.audio_segments: list[np.ndarray] = []
         self.audio_sample_rate: int | None = None
         self.phrases: queue.Queue[object] = queue.Queue()
-        self.worker = threading.Thread(target=self._run, daemon=True)
-        self.worker.start()
+        self.audio_chunks: queue.Queue[object] = queue.Queue()
+        self.failure: Exception | None = None
+        self.finish_sent = threading.Event()
+        self.stream_lock = threading.Lock()
+        self.output_stream = None
+        self.synthesis_worker = threading.Thread(target=self._run_synthesis, daemon=True)
+        self.playback_worker = threading.Thread(target=self._run_playback, daemon=True)
+        self.synthesis_worker.start()
+        self.playback_worker.start()
 
     def feed(self, chunk: str) -> None:
         if self.stopped.is_set():
@@ -1007,8 +1042,13 @@ class StreamingSpeech:
         self.buffer = ""
         if remainder and not self.stopped.is_set():
             self.phrases.put(remainder)
-        self.phrases.put(self._END)
-        self.worker.join()
+        if not self.finish_sent.is_set():
+            self.finish_sent.set()
+            self.phrases.put(self._END)
+        self.synthesis_worker.join()
+        self.playback_worker.join()
+        if self.failure is not None:
+            raise RuntimeError(f"Continuous voice output failed: {self.failure}") from self.failure
         total = time.monotonic() - self.started
         return {
             "first_audio": self.first_audio_seconds if self.first_audio_seconds is not None else total,
@@ -1017,31 +1057,86 @@ class StreamingSpeech:
 
     def stop(self) -> None:
         self.stopped.set()
+        with self.stream_lock:
+            stream = self.output_stream
+        if stream is not None:
+            try:
+                stream.abort()
+            except Exception:
+                pass
         self.engines.stop_speaking()
-        self.phrases.put(self._END)
+        if not self.finish_sent.is_set():
+            self.finish_sent.set()
+            self.phrases.put(self._END)
+        self.audio_chunks.put(self._END)
 
     def captured_audio(self) -> tuple[np.ndarray, int] | None:
         if self.stopped.is_set() or not self.audio_segments or self.audio_sample_rate is None:
             return None
         return np.concatenate(self.audio_segments), self.audio_sample_rate
 
-    def _run(self) -> None:
-        while True:
-            phrase = self.phrases.get()
-            if phrase is self._END:
-                return
-            if self.stopped.is_set():
-                continue
-            samples, sample_rate = self.engines.synthesize(str(phrase))
-            if self.stopped.is_set():
-                continue
-            if self.audio_sample_rate is None:
-                self.audio_sample_rate = sample_rate
-            if sample_rate == self.audio_sample_rate:
-                self.audio_segments.append(np.asarray(samples, dtype=np.float32).reshape(-1).copy())
-            if self.first_audio_seconds is None:
-                self.first_audio_seconds = time.monotonic() - self.started
-            self.engines.play(samples, sample_rate)
+    def _run_synthesis(self) -> None:
+        try:
+            while True:
+                phrase = self.phrases.get()
+                if phrase is self._END or self.stopped.is_set():
+                    return
+                samples, sample_rate = self.engines.synthesize(str(phrase))
+                if self.stopped.is_set():
+                    return
+                samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+                if self.audio_sample_rate is None:
+                    self.audio_sample_rate = sample_rate
+                captured_samples = (
+                    samples
+                    if sample_rate == self.audio_sample_rate
+                    else resample_audio(samples, sample_rate, self.audio_sample_rate)
+                )
+                self.audio_segments.append(captured_samples.copy())
+                self.audio_chunks.put((samples, sample_rate))
+        except Exception as exc:
+            if not self.stopped.is_set():
+                self.failure = exc
+                self.stopped.set()
+        finally:
+            self.audio_chunks.put(self._END)
+
+    def _run_playback(self) -> None:
+        stream = None
+        playback_rate: int | None = None
+        try:
+            while True:
+                item = self.audio_chunks.get()
+                if item is self._END or self.stopped.is_set():
+                    return
+                samples, sample_rate = item
+                if stream is None:
+                    stream, playback_rate = self.engines.open_output_stream(sample_rate)
+                    with self.stream_lock:
+                        self.output_stream = stream
+                if self.first_audio_seconds is None:
+                    self.first_audio_seconds = time.monotonic() - self.started
+                playback_samples = resample_audio(samples, sample_rate, playback_rate)
+                stream.write(playback_samples.reshape(-1, 1))
+        except Exception as exc:
+            if not self.stopped.is_set():
+                self.failure = exc
+                self.stopped.set()
+        finally:
+            if stream is not None:
+                try:
+                    if self.stopped.is_set():
+                        stream.abort()
+                    else:
+                        stream.stop()
+                except Exception:
+                    pass
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            with self.stream_lock:
+                self.output_stream = None
 
 
 class SolomonPocketAIApp:

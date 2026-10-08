@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -11,6 +12,28 @@ import SolomonPocketAI as app
 
 
 class AudioSettingsTest(unittest.TestCase):
+    class _FakeOutputStream:
+        def __init__(self, on_write=None) -> None:
+            self.on_write = on_write
+            self.writes: list[np.ndarray] = []
+            self.aborted = False
+            self.stopped = False
+            self.closed = False
+
+        def write(self, samples: np.ndarray) -> None:
+            self.writes.append(samples.copy())
+            if self.on_write is not None:
+                self.on_write(len(self.writes))
+
+        def abort(self) -> None:
+            self.aborted = True
+
+        def stop(self) -> None:
+            self.stopped = True
+
+        def close(self) -> None:
+            self.closed = True
+
     def test_interface_font_scale_is_bounded_and_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             settings_file = Path(temporary) / "settings.json"
@@ -62,6 +85,8 @@ class AudioSettingsTest(unittest.TestCase):
     def test_streaming_speech_captures_original_audio_for_replay(self) -> None:
         engines = mock.Mock()
         engines.synthesize.return_value = (np.ones(240, dtype=np.float32), 24_000)
+        stream = self._FakeOutputStream()
+        engines.open_output_stream.return_value = (stream, 24_000)
         speaker = app.StreamingSpeech(engines)
         speaker.feed("This short answer should be replayable.")
         speaker.finish()
@@ -70,7 +95,39 @@ class AudioSettingsTest(unittest.TestCase):
         samples, sample_rate = captured
         self.assertEqual(240, samples.size)
         self.assertEqual(24_000, sample_rate)
-        engines.play.assert_called_once()
+        engines.open_output_stream.assert_called_once_with(24_000)
+        self.assertEqual(1, len(stream.writes))
+        self.assertTrue(stream.stopped)
+        self.assertTrue(stream.closed)
+
+    def test_streaming_speech_synthesizes_ahead_of_continuous_playback(self) -> None:
+        engines = mock.Mock()
+        second_phrase_ready = threading.Event()
+        overlap_observed: list[bool] = []
+
+        def synthesize(text: str) -> tuple[np.ndarray, int]:
+            if text.startswith("Second"):
+                second_phrase_ready.set()
+            return np.ones(4_800, dtype=np.float32), 24_000
+
+        def observe_first_write(write_number: int) -> None:
+            if write_number == 1:
+                overlap_observed.append(second_phrase_ready.wait(timeout=1.0))
+
+        stream = self._FakeOutputStream(on_write=observe_first_write)
+        engines.synthesize.side_effect = synthesize
+        engines.open_output_stream.return_value = (stream, 24_000)
+        speaker = app.StreamingSpeech(engines)
+        speaker.feed(
+            "First phrase has enough words to begin. "
+            "Second phrase also has enough words to continue."
+        )
+        speaker.finish()
+
+        self.assertEqual([True], overlap_observed)
+        self.assertEqual(2, engines.synthesize.call_count)
+        self.assertEqual(2, len(stream.writes))
+        engines.open_output_stream.assert_called_once_with(24_000)
 
     def test_chinese_voice_uses_mandarin_code_and_preview(self) -> None:
         self.assertEqual("cmn", app.voice_language("zf_xiaoni"))

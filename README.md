@@ -28,6 +28,7 @@ Setup installs or verifies Git, the tested Python 3.11 runtime, all packages in 
 
 - Hold private spoken or typed conversations using `qwen3.5:4b` through local Ollama.
 - Detect and transcribe English or Mandarin microphone input with local Whisper, then automatically speak each answer with the matching local Kokoro voice.
+- Practice languages with mixed English-and-Mandarin replies that switch between the configured voices inside the same spoken answer.
 - Stream speech through one continuous audio connection while the next phrase renders ahead, avoiding stop-and-restart gaps between generated sentences.
 - Stop active or queued speech immediately with **Stop voice**.
 - Replay the three most recent spoken responses instantly from the local audio cache.

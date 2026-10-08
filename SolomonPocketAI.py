@@ -107,7 +107,11 @@ SYSTEM_PROMPT = (
     "trust classifications, or handling rules in the answer. Return only the useful answer to the user. "
     "Never use markdown asterisks; use plain sentences or hyphen bullets. Have a natural, "
     "thoughtful conversation. Be warm and direct. Default to two or three short "
-    "spoken sentences unless the user asks for depth."
+    "spoken sentences unless the user asks for depth. When the user asks for bilingual "
+    "English and Mandarin practice, every teaching answer must contain both English words "
+    "and actual Simplified Chinese characters in short paired examples that are natural to "
+    "hear aloud. Pinyin may be additional help, but it must not replace the Chinese characters. "
+    "Give accurate standard translations and do not invent literal etymologies."
 )
 
 
@@ -598,6 +602,34 @@ def spoken_language_for_text(text: str) -> str:
     return "zh" if cjk_count >= 2 and cjk_count * 2 >= latin_count else "en"
 
 
+def spoken_language_segments(text: str) -> list[tuple[str, str]]:
+    """Split mixed English/Mandarin text without dropping spaces or punctuation."""
+    segments: list[tuple[str, str]] = []
+    buffer: list[str] = []
+    language: str | None = None
+    for character in text:
+        if re.match(r"[\u3400-\u4dbf\u4e00-\u9fff]", character):
+            character_language = "zh"
+        elif character.isalpha():
+            character_language = "en"
+        else:
+            character_language = None
+        if character_language is None or language in (None, character_language):
+            buffer.append(character)
+            if character_language is not None:
+                language = character_language
+            continue
+        segment = "".join(buffer)
+        if segment.strip():
+            segments.append((language, segment))
+        buffer = [character]
+        language = character_language
+    remainder = "".join(buffer)
+    if remainder.strip():
+        segments.append((language or "en", remainder))
+    return segments
+
+
 def build_turn_prompt(reply_seconds: int) -> str:
     reply_seconds = reply_seconds if reply_seconds in VALID_SECONDS else DEFAULT_SETTINGS["max_reply_seconds"]
     target_words = max(10, round(reply_seconds * 2.4))
@@ -611,6 +643,36 @@ def build_turn_prompt(reply_seconds: int) -> str:
         + saved_memory
         + "\n</local_memory>"
     )
+
+
+def bilingual_mandarin_mode(messages: list[dict[str, str]]) -> bool:
+    """Track an explicit English/Mandarin learning request in recent user turns."""
+    enabled = False
+    for message in messages[-12:]:
+        if message.get("role") != "user":
+            continue
+        text = str(message.get("content", "")).casefold()
+        if any(
+            phrase in text
+            for phrase in (
+                "english only",
+                "chinese only",
+                "mandarin only",
+                "stop bilingual",
+                "stop language practice",
+                "end language practice",
+            )
+        ):
+            enabled = False
+            continue
+        names_both_languages = "english" in text and ("chinese" in text or "mandarin" in text)
+        requests_mixed_practice = any(
+            cue in text
+            for cue in ("bilingual", "both", "mix", "learn", "practice", "teach", "translate")
+        )
+        if names_both_languages and requests_mixed_practice:
+            enabled = True
+    return enabled
 
 
 INTERNAL_GUIDANCE_FRAGMENTS = (
@@ -659,6 +721,15 @@ def ollama_chat_stream(
         {"role": "system", "content": turn_prompt},
         *[dict(message) for message in messages[-12:]],
     ]
+    is_bilingual_lesson = bilingual_mandarin_mode(messages)
+    if is_bilingual_lesson and api_messages[-1].get("role") == "user":
+        api_messages[-1]["content"] = (
+            str(api_messages[-1].get("content", ""))
+            + "\n\nBilingual learning output requirement: include both natural English and actual "
+            "Simplified Chinese characters in this answer. Use short paired examples. "
+            "Pinyin is optional and cannot replace the Chinese characters. Give exactly "
+            "the number of examples requested and do not add unrelated phrases."
+        )
     if image_bytes:
         if not api_messages or api_messages[-1].get("role") != "user":
             raise RuntimeError("Vision requests require a final user message.")
@@ -671,7 +742,7 @@ def ollama_chat_stream(
             "think": False,
             "keep_alive": "30m",
             "options": {
-                "temperature": 0.7,
+                "temperature": 0.2 if is_bilingual_lesson else 0.7,
                 "num_ctx": 2048,
                 "num_predict": max(24, min(180, reply_seconds * 6)),
             },
@@ -929,9 +1000,24 @@ class VoiceEngines:
 
     def synthesize(self, text: str) -> tuple[np.ndarray, int]:
         kokoro = self.load_kokoro()
-        selected_voice = self.mandarin_voice if spoken_language_for_text(text) == "zh" else self.voice
+        rendered_segments: list[np.ndarray] = []
+        output_rate: int | None = None
+        for language, speech_text in spoken_language_segments(text[:1800]):
+            selected_voice = self.mandarin_voice if language == "zh" else self.voice
+            samples, sample_rate = self._synthesize_segment(kokoro, speech_text, selected_voice)
+            if output_rate is None:
+                output_rate = sample_rate
+            elif sample_rate != output_rate:
+                samples = resample_audio(samples, sample_rate, output_rate)
+            rendered_segments.append(samples)
+        if not rendered_segments or output_rate is None:
+            return np.empty(0, dtype=np.float32), 24_000
+        if len(rendered_segments) == 1:
+            return rendered_segments[0], output_rate
+        return np.concatenate(rendered_segments), output_rate
+
+    def _synthesize_segment(self, kokoro, speech_text: str, selected_voice: str) -> tuple[np.ndarray, int]:
         is_phonemes = False
-        speech_text = text[:1800]
         if selected_voice.startswith("z"):
             if self._zh_g2p is None:
                 from misaki import zh

@@ -249,6 +249,57 @@ class AudioSettingsTest(unittest.TestCase):
         self.assertEqual("cmn", mandarin_call.kwargs["lang"])
         self.assertTrue(mandarin_call.kwargs["is_phonemes"])
 
+    def test_mixed_language_answer_switches_voices_inside_one_phrase(self) -> None:
+        self.assertEqual(
+            [
+                ("en", "Good morning — "),
+                ("zh", "早上好 — "),
+                ("en", "means good morning."),
+            ],
+            app.spoken_language_segments("Good morning — 早上好 — means good morning."),
+        )
+        kokoro = mock.Mock()
+        kokoro.create.side_effect = (
+            (np.full(120, 1.0, dtype=np.float32), 24_000),
+            (np.full(160, 2.0, dtype=np.float32), 24_000),
+            (np.full(200, 3.0, dtype=np.float32), 24_000),
+        )
+        engine = app.VoiceEngines(voice="af_heart", mandarin_voice="zf_xiaoni")
+        engine._zh_g2p = mock.Mock(return_value=("mandarin phonemes", []))
+        with mock.patch.object(engine, "load_kokoro", return_value=kokoro):
+            samples, sample_rate = engine.synthesize(
+                "Good morning — 早上好 — means good morning."
+            )
+
+        self.assertEqual(24_000, sample_rate)
+        self.assertEqual(480, samples.size)
+        self.assertEqual(
+            ["af_heart", "zf_xiaoni", "af_heart"],
+            [call.kwargs["voice"] for call in kokoro.create.call_args_list],
+        )
+        self.assertEqual(
+            ["en-us", "cmn", "en-us"],
+            [call.kwargs["lang"] for call in kokoro.create.call_args_list],
+        )
+        self.assertEqual("早上好 — ", engine._zh_g2p.call_args.args[0])
+
+    def test_bilingual_learning_mode_persists_and_can_be_ended(self) -> None:
+        request = {
+            "role": "user",
+            "content": "Mix English and Mandarin so I can practice both languages.",
+        }
+        self.assertTrue(app.bilingual_mandarin_mode([request]))
+        self.assertTrue(
+            app.bilingual_mandarin_mode(
+                [request, {"role": "assistant", "content": "Hello. 你好。"}, {"role": "user", "content": "Continue."}]
+            )
+        )
+        self.assertFalse(
+            app.bilingual_mandarin_mode(
+                [request, {"role": "user", "content": "Use English only now."}]
+            )
+        )
+
     def test_microphone_transcription_detects_english_or_mandarin(self) -> None:
         audio = np.ones(app.SAMPLE_RATE, dtype=np.float32) * 0.1
         for probabilities, expected_language, transcript in (

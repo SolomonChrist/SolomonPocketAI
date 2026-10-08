@@ -41,6 +41,10 @@ function Get-WinGetPath {
     if ($command) {
         return $command.Source
     }
+    $windowsAppsWinget = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+    if (Test-Path -LiteralPath $windowsAppsWinget -PathType Leaf) {
+        return $windowsAppsWinget
+    }
     return $null
 }
 
@@ -98,12 +102,31 @@ function Test-OllamaApi {
     }
 }
 
+function Test-Python311Command(
+    [string]$Launcher,
+    [string[]]$Prefix
+) {
+    # Windows PowerShell 5.1 converts a native program's stderr into an error
+    # record. A missing `py -3.11` is an expected negative probe, so it must not
+    # inherit the script-wide Stop preference and abort before auto-install.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $Launcher @Prefix -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' 2>$null | Out-Null
+        $pythonExitCode = $LASTEXITCODE
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return ($pythonExitCode -eq 0)
+}
+
 function Resolve-Python311 {
     $launcher = Get-Command py.exe -CommandType Application -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if ($launcher) {
-        & $launcher.Source -3.11 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' 2>$null
-        if ($LASTEXITCODE -eq 0) {
+        if (Test-Python311Command -Launcher $launcher.Source -Prefix @('-3.11')) {
             return @{ Launcher = $launcher.Source; Prefix = @('-3.11') }
         }
     }
@@ -114,8 +137,7 @@ function Resolve-Python311 {
             Select-Object -First 1).Source
     ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
     foreach ($candidate in $candidates) {
-        & $candidate -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' 2>$null
-        if ($LASTEXITCODE -eq 0) {
+        if (Test-Python311Command -Launcher $candidate -Prefix @()) {
             return @{ Launcher = $candidate; Prefix = @() }
         }
     }
@@ -195,8 +217,7 @@ Write-Step 'Creating the private Python environment'
 if (Test-Path -LiteralPath $venvRoot) {
     $venvIsCompatible = $false
     if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
-        & $venvPython -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' 2>$null
-        $venvIsCompatible = ($LASTEXITCODE -eq 0)
+        $venvIsCompatible = Test-Python311Command -Launcher $venvPython -Prefix @()
     }
     if (-not $venvIsCompatible) {
         $backupName = '.venv-incompatible-' + (Get-Date -Format 'yyyyMMdd-HHmmss')

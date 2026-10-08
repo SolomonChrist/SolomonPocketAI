@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 import tempfile
 import threading
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -133,6 +134,62 @@ class AudioSettingsTest(unittest.TestCase):
         self.assertEqual("cmn", app.voice_language("zf_xiaoni"))
         preview = app.voice_preview_text("zf_xiaoni")
         self.assertIn("中文语音测试", preview)
+
+    def test_microphone_transcription_detects_english_or_mandarin(self) -> None:
+        audio = np.ones(app.SAMPLE_RATE, dtype=np.float32) * 0.1
+        for probabilities, expected_language, transcript in (
+            ({"en": 0.91, "zh": 0.06}, "en", "Hello, Solomon."),
+            ({"en": 0.04, "zh": 0.94}, "zh", "你好，Solomon。"),
+        ):
+            with self.subTest(expected_language=expected_language):
+                mel = mock.Mock()
+                mel.to.return_value = mel
+                whisper_module = SimpleNamespace(
+                    pad_or_trim=mock.Mock(return_value=audio),
+                    log_mel_spectrogram=mock.Mock(return_value=mel),
+                )
+                model = mock.Mock()
+                model.dims.n_mels = 80
+                model.device = "cpu"
+                model.detect_language.return_value = (None, probabilities)
+                model.transcribe.return_value = {"text": transcript}
+                engine = app.VoiceEngines()
+                with (
+                    mock.patch.object(engine, "load_whisper", return_value=model),
+                    mock.patch.dict("sys.modules", {"whisper": whisper_module}),
+                ):
+                    self.assertEqual(transcript, engine.transcribe(audio))
+
+                model.transcribe.assert_called_once()
+                self.assertEqual(expected_language, model.transcribe.call_args.kwargs["language"])
+                self.assertEqual("transcribe", model.transcribe.call_args.kwargs["task"])
+
+    def test_english_only_whisper_model_falls_back_to_english(self) -> None:
+        audio = np.ones(app.SAMPLE_RATE, dtype=np.float32) * 0.1
+        mel = mock.Mock()
+        mel.to.return_value = mel
+        whisper_module = SimpleNamespace(
+            pad_or_trim=mock.Mock(return_value=audio),
+            log_mel_spectrogram=mock.Mock(return_value=mel),
+        )
+        model = mock.Mock()
+        model.dims.n_mels = 80
+        model.device = "cpu"
+        model.detect_language.side_effect = ValueError("not multilingual")
+        model.transcribe.return_value = {"text": "English only."}
+        engine = app.VoiceEngines()
+        with (
+            mock.patch.object(engine, "load_whisper", return_value=model),
+            mock.patch.dict("sys.modules", {"whisper": whisper_module}),
+        ):
+            self.assertEqual("English only.", engine.transcribe(audio))
+        self.assertEqual("en", model.transcribe.call_args.kwargs["language"])
+
+    def test_mandarin_partial_transcript_can_prefill_without_spaces(self) -> None:
+        self.assertTrue(app.substantial_partial_transcript("你好，我想问问题"))
+        self.assertTrue(app.substantial_partial_transcript("please help me"))
+        self.assertFalse(app.substantial_partial_transcript("你好"))
+        self.assertFalse(app.substantial_partial_transcript("too short"))
 
     def test_resample_converts_kokoro_rate_for_realtek_style_output(self) -> None:
         samples = np.zeros(24_000, dtype=np.float32)

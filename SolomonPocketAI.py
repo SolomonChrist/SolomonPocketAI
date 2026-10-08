@@ -627,6 +627,13 @@ def sanitize_grounded_response(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
+def substantial_partial_transcript(text: str) -> bool:
+    """Accept a short English phrase or four CJK characters for prefill."""
+    if len(text.split()) >= 3:
+        return True
+    return len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", text)) >= 4
+
+
 def ollama_chat_stream(
     messages: list[dict[str, str]],
     on_chunk=None,
@@ -874,10 +881,29 @@ class VoiceEngines:
         if float(np.sqrt(np.mean(np.square(audio, dtype=np.float64)))) < 0.003:
             return ""
         model = self.load_whisper()
+        audio = audio.astype(np.float32, copy=False)
         with self._transcribe_lock:
+            import whisper
+
+            detection_audio = whisper.pad_or_trim(audio)
+            mel = whisper.log_mel_spectrogram(
+                detection_audio,
+                n_mels=model.dims.n_mels,
+            ).to(model.device)
+            try:
+                _language_token, probabilities = model.detect_language(mel)
+                language = (
+                    "zh"
+                    if float(probabilities.get("zh", 0.0)) > float(probabilities.get("en", 0.0))
+                    else "en"
+                )
+            except ValueError:
+                # A user-supplied English-only Whisper model has no language
+                # tokens. It can still transcribe English normally.
+                language = "en"
             result = model.transcribe(
-                audio.astype(np.float32, copy=False),
-                language="en",
+                audio,
+                language=language,
                 task="transcribe",
                 fp16=False,
                 temperature=(0.0, 0.2, 0.4, 0.6),
@@ -1617,7 +1643,7 @@ class SolomonPocketAIApp:
             partial = self.engines.transcribe(audio)
             if (
                 not partial
-                or len(partial.split()) < 3
+                or not substantial_partial_transcript(partial)
                 or not self.recording
                 or generation != self.recording_generation
             ):

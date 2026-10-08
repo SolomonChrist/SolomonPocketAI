@@ -27,7 +27,7 @@ Setup installs or verifies Git, the tested Python 3.11 runtime, all packages in 
 ## What it can do
 
 - Hold private spoken or typed conversations using `qwen3.5:4b` through local Ollama.
-- Transcribe microphone input with local Whisper and speak answers with local Kokoro.
+- Detect and transcribe English or Mandarin microphone input with local Whisper, and speak answers with local Kokoro.
 - Stream speech through one continuous audio connection while the next phrase renders ahead, avoiding stop-and-restart gaps between generated sentences.
 - Replay the three most recent spoken responses instantly from the local audio cache.
 - Keep short Obsidian-compatible Markdown memory.

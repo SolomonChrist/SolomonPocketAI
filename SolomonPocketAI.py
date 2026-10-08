@@ -61,6 +61,10 @@ FONT_SCALE_CHOICES = {
     "Large (115%)": 1.15,
     "Extra large (130%)": 1.3,
 }
+VOICE_MODE_CHOICES = {
+    "Automatic English / Mandarin": "auto",
+    "One voice for everything": "single",
+}
 DEFAULT_SETTINGS = {
     "max_input_seconds": 15,
     "max_reply_seconds": 10,
@@ -74,6 +78,8 @@ DEFAULT_SETTINGS = {
     "voice_model": KOKORO_MODEL.name,
     "voice": "af_heart",
     "mandarin_voice": "zf_xiaoni",
+    "voice_mode": "auto",
+    "single_voice": "af_heart",
     "voice_speed": 1.0,
     "interface_scale": 1.0,
     "trusted_folder": None,
@@ -321,10 +327,22 @@ def load_settings() -> dict[str, object]:
         candidate = loaded.get(key)
         if isinstance(candidate, str) and candidate.strip():
             settings[key] = candidate.strip()
-    for key in ("language_model", "whisper_model", "voice_model", "voice", "mandarin_voice"):
+    for key in (
+        "language_model",
+        "whisper_model",
+        "voice_model",
+        "voice",
+        "mandarin_voice",
+        "single_voice",
+    ):
         candidate = loaded.get(key)
         if isinstance(candidate, str) and candidate.strip():
             settings[key] = candidate.strip()
+    if "single_voice" not in loaded:
+        settings["single_voice"] = settings["voice"]
+    candidate_voice_mode = loaded.get("voice_mode")
+    if candidate_voice_mode in VOICE_MODE_CHOICES.values():
+        settings["voice_mode"] = candidate_voice_mode
     candidate_speed = loaded.get("voice_speed")
     if isinstance(candidate_speed, (int, float)) and 0.5 <= float(candidate_speed) <= 2.0:
         settings["voice_speed"] = float(candidate_speed)
@@ -345,9 +363,22 @@ def save_settings(settings: dict[str, object]) -> None:
     for key in ("input_device", "output_device"):
         candidate = settings.get(key)
         clean[key] = candidate.strip() if isinstance(candidate, str) and candidate.strip() else None
-    for key in ("language_model", "whisper_model", "voice_model", "voice", "mandarin_voice"):
+    for key in (
+        "language_model",
+        "whisper_model",
+        "voice_model",
+        "voice",
+        "mandarin_voice",
+        "single_voice",
+    ):
         candidate = settings.get(key)
         clean[key] = str(candidate).strip() if isinstance(candidate, str) and candidate.strip() else DEFAULT_SETTINGS[key]
+    candidate_voice_mode = settings.get("voice_mode")
+    clean["voice_mode"] = (
+        str(candidate_voice_mode)
+        if candidate_voice_mode in VOICE_MODE_CHOICES.values()
+        else DEFAULT_SETTINGS["voice_mode"]
+    )
     candidate_speed = settings.get("voice_speed")
     clean["voice_speed"] = (
         float(candidate_speed)
@@ -917,6 +948,8 @@ class VoiceEngines:
         voice_model: str = KOKORO_MODEL.name,
         voice: str = "af_heart",
         mandarin_voice: str = "zf_xiaoni",
+        voice_mode: str = "auto",
+        single_voice: str = "af_heart",
         voice_speed: float = 1.0,
     ) -> None:
         self._whisper = None
@@ -929,6 +962,8 @@ class VoiceEngines:
         self.voice_model = voice_model
         self.voice = voice
         self.mandarin_voice = mandarin_voice
+        self.voice_mode = voice_mode
+        self.single_voice = single_voice
         self.voice_speed = voice_speed
 
     def load_whisper(self):
@@ -1008,10 +1043,18 @@ class VoiceEngines:
         kokoro = self.load_kokoro()
         rendered_segments: list[np.ndarray] = []
         output_rate: int | None = None
-        for language, speech_text in spoken_language_segments(text[:1800]):
+        speech_segments = (
+            [("single", text[:1800])]
+            if self.voice_mode == "single"
+            else spoken_language_segments(text[:1800])
+        )
+        for language, speech_text in speech_segments:
             if cancel_event is not None and cancel_event.is_set():
                 break
-            selected_voice = self.mandarin_voice if language == "zh" else self.voice
+            if language == "single":
+                selected_voice = self.single_voice
+            else:
+                selected_voice = self.mandarin_voice if language == "zh" else self.voice
             samples, sample_rate = self._synthesize_segment(kokoro, speech_text, selected_voice)
             if cancel_event is not None and cancel_event.is_set():
                 break
@@ -1106,6 +1149,8 @@ class VoiceEngines:
         voice_model: str,
         voice: str,
         mandarin_voice: str,
+        voice_mode: str,
+        single_voice: str,
         voice_speed: float,
     ) -> None:
         self.stop_speaking()
@@ -1117,6 +1162,8 @@ class VoiceEngines:
             self.voice_model = voice_model
         self.voice = voice
         self.mandarin_voice = mandarin_voice
+        self.voice_mode = voice_mode
+        self.single_voice = single_voice
         self.voice_speed = voice_speed
         self.output_device = output_device
 
@@ -1309,6 +1356,8 @@ class SolomonPocketAIApp:
             voice_model=str(self.settings.get("voice_model", KOKORO_MODEL.name)),
             voice=str(self.settings.get("voice", "af_heart")),
             mandarin_voice=str(self.settings.get("mandarin_voice", "zf_xiaoni")),
+            voice_mode=str(self.settings.get("voice_mode", "auto")),
+            single_voice=str(self.settings.get("single_voice", self.settings.get("voice", "af_heart"))),
             voice_speed=float(self.settings.get("voice_speed", 1.0)),
         )
         self.tools_startup_warning = ""
@@ -1626,11 +1675,17 @@ class SolomonPocketAIApp:
         self.transcript.see(tk.END)
 
     def _update_limits_label(self) -> None:
+        if self.settings.get("voice_mode", "auto") == "single":
+            voice_summary = f"Kokoro single {self.settings.get('single_voice', 'af_heart')}"
+        else:
+            voice_summary = (
+                f"Kokoro auto EN {self.settings.get('voice', 'af_heart')} / "
+                f"ZH {self.settings.get('mandarin_voice', 'zf_xiaoni')}"
+            )
         self.subtitle.configure(
             text=(
                 f"{OLLAMA_MODEL}  •  Whisper {self.settings.get('whisper_model', 'tiny')}  •  "
-                f"Kokoro EN {self.settings.get('voice', 'af_heart')} / "
-                f"ZH {self.settings.get('mandarin_voice', 'zf_xiaoni')}  •  "
+                f"{voice_summary}  •  "
                 f"input ≤ {self.settings['max_input_seconds']}s  •  "
                 f"reply ≈ {self.settings['max_reply_seconds']}s"
             )
@@ -2418,10 +2473,12 @@ class SettingsDialog:
         self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=24)
         self.audio_tab = tk.Frame(self.notebook, bg="#ffffff", padx=20, pady=18)
         self.models_tab = tk.Frame(self.notebook, bg="#ffffff", padx=20, pady=18)
+        self.voice_tab = tk.Frame(self.notebook, bg="#ffffff", padx=20, pady=18)
         self.files_tab = tk.Frame(self.notebook, bg="#ffffff", padx=20, pady=18)
         self.appearance_tab = tk.Frame(self.notebook, bg="#ffffff", padx=20, pady=18)
         self.notebook.add(self.audio_tab, text="Microphone & Speaker")
-        self.notebook.add(self.models_tab, text="Models & Voice")
+        self.notebook.add(self.models_tab, text="Models")
+        self.notebook.add(self.voice_tab, text="Voice")
         self.notebook.add(self.files_tab, text="Trusted Folder")
         self.notebook.add(self.appearance_tab, text="Appearance")
 
@@ -2453,6 +2510,7 @@ class SettingsDialog:
         self.voice_names = installed_voice_names()
         english_names = [name for name in self.voice_names if name.startswith(("a", "b"))]
         mandarin_names = [name for name in self.voice_names if name.startswith("z")]
+        self.all_voice_by_label = {voice_display_name(name): name for name in self.voice_names}
         self.voice_by_label = {voice_display_name(name): name for name in english_names}
         self.mandarin_voice_by_label = {voice_display_name(name): name for name in mandarin_names}
         current_voice = str(app.settings.get("voice", "af_heart"))
@@ -2471,8 +2529,23 @@ class SettingsDialog:
         if current_mandarin_label not in self.mandarin_voice_by_label:
             self.mandarin_voice_by_label[current_mandarin_label] = current_mandarin_voice
         self.mandarin_voice_var = tk.StringVar(value=current_mandarin_label)
+        current_voice_mode = str(app.settings.get("voice_mode", "auto"))
+        current_voice_mode_label = next(
+            (label for label, mode in VOICE_MODE_CHOICES.items() if mode == current_voice_mode),
+            "Automatic English / Mandarin",
+        )
+        self.voice_mode_var = tk.StringVar(value=current_voice_mode_label)
+        current_single_voice = str(app.settings.get("single_voice", current_voice))
+        current_single_label = next(
+            (label for label, name in self.all_voice_by_label.items() if name == current_single_voice),
+            voice_display_name(current_single_voice),
+        )
+        if current_single_label not in self.all_voice_by_label:
+            self.all_voice_by_label[current_single_label] = current_single_voice
+        self.single_voice_var = tk.StringVar(value=current_single_label)
         self.voice_speed_var = tk.StringVar(value=f"{float(app.settings.get('voice_speed', 1.0)):.2f}")
         self._build_models_tab()
+        self._build_voice_tab()
 
         self.trusted_folder_var = tk.StringVar(value=str(app.settings.get("trusted_folder") or ""))
         self._build_files_tab()
@@ -2649,21 +2722,51 @@ class SettingsDialog:
             self.voice_model_var,
             self.voice_models,
         )
-        self._field(
-            self.models_tab,
-            5,
+
+    def _build_voice_tab(self) -> None:
+        self.voice_mode_combo = self._field(
+            self.voice_tab,
+            0,
+            "Voice playback mode",
+            self.voice_mode_var,
+            list(VOICE_MODE_CHOICES),
+        )
+        self.voice_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_voice_mode_controls())
+        tk.Label(
+            self.voice_tab,
+            text=(
+                "Automatic mode switches between the English and Mandarin voices inside mixed replies. "
+                "One-voice mode uses the selected installed voice for the entire answer. For natural "
+                "pronunciation in one-voice mode, also ask the conversation to use that one language."
+            ),
+            wraplength=680,
+            justify=tk.LEFT,
+            fg="#64737a",
+            bg="#ffffff",
+            font=ui_font(9),
+        ).grid(row=2, column=0, sticky="w", pady=(0, 12))
+        self.english_voice_combo = self._field(
+            self.voice_tab,
+            3,
             "English response voice",
             self.voice_var,
             list(self.voice_by_label),
         )
-        self._field(
-            self.models_tab,
-            7,
+        self.mandarin_voice_combo = self._field(
+            self.voice_tab,
+            5,
             "Mandarin response voice",
             self.mandarin_voice_var,
             list(self.mandarin_voice_by_label),
         )
-        voice_controls = tk.Frame(self.models_tab, bg="#ffffff")
+        self.single_voice_combo = self._field(
+            self.voice_tab,
+            7,
+            "One voice for everything (all installed languages)",
+            self.single_voice_var,
+            list(self.all_voice_by_label),
+        )
+        voice_controls = tk.Frame(self.voice_tab, bg="#ffffff")
         voice_controls.grid(row=9, column=0, sticky="ew")
         tk.Label(
             voice_controls,
@@ -2701,6 +2804,28 @@ class SettingsDialog:
             pady=6,
         )
         self.mandarin_preview_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.single_preview_button = tk.Button(
+            voice_controls,
+            text="Preview one voice",
+            command=lambda: self.test_speaker("single"),
+            bg="#0d7c70",
+            fg="#ffffff",
+            relief=tk.FLAT,
+            padx=12,
+            pady=6,
+        )
+        self.single_preview_button.pack(side=tk.LEFT, padx=(8, 0))
+        self._update_voice_mode_controls()
+
+    def _update_voice_mode_controls(self) -> None:
+        single_mode = VOICE_MODE_CHOICES.get(self.voice_mode_var.get(), "auto") == "single"
+        self.english_voice_combo.configure(state="disabled" if single_mode else "readonly")
+        self.mandarin_voice_combo.configure(state="disabled" if single_mode else "readonly")
+        self.single_voice_combo.configure(state="readonly" if single_mode else "disabled")
+        if not self.busy:
+            self.preview_button.configure(state=tk.DISABLED if single_mode else tk.NORMAL)
+            self.mandarin_preview_button.configure(state=tk.DISABLED if single_mode else tk.NORMAL)
+            self.single_preview_button.configure(state=tk.NORMAL if single_mode else tk.DISABLED)
 
     def _build_appearance_tab(self) -> None:
         self._field(
@@ -2844,11 +2969,14 @@ class SettingsDialog:
             self.download_whisper_button,
             self.preview_button,
             self.mandarin_preview_button,
+            self.single_preview_button,
             self.choose_folder_button,
             self.use_app_folder_button,
             self.save_button,
         ):
             button.configure(state=state)
+        if not busy:
+            self._update_voice_mode_controls()
         self.dialog_status.set(message)
 
     def refresh_devices(self) -> None:
@@ -2907,12 +3035,14 @@ class SettingsDialog:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def test_speaker(self, language: str = "en") -> None:
+    def test_speaker(self, language: str = "active") -> None:
         if self.busy:
             return
         output_device = self.output_by_label.get(self.output_var.get())
         if language == "zh":
             voice = self.mandarin_voice_by_label.get(self.mandarin_voice_var.get(), "zf_xiaoni")
+        elif language == "single" or VOICE_MODE_CHOICES.get(self.voice_mode_var.get()) == "single":
+            voice = self.all_voice_by_label.get(self.single_voice_var.get(), "af_heart")
         else:
             voice = self.voice_by_label.get(self.voice_var.get(), "af_heart")
         voice_model = self.voice_model_var.get()
@@ -2926,6 +3056,8 @@ class SettingsDialog:
                     voice_model=voice_model,
                     voice=voice,
                     mandarin_voice=voice,
+                    voice_mode="single",
+                    single_voice=voice,
                     voice_speed=voice_speed,
                 )
                 preview_engine.speak(voice_preview_text(voice))
@@ -3005,6 +3137,10 @@ class SettingsDialog:
                 "mandarin_voice": self.mandarin_voice_by_label.get(
                     self.mandarin_voice_var.get(), "zf_xiaoni"
                 ),
+                "voice_mode": VOICE_MODE_CHOICES.get(self.voice_mode_var.get(), "auto"),
+                "single_voice": self.all_voice_by_label.get(
+                    self.single_voice_var.get(), "af_heart"
+                ),
                 "voice_speed": float(self.voice_speed_var.get()),
                 "interface_scale": FONT_SCALE_CHOICES.get(self.interface_scale_var.get(), 1.0),
                 "trusted_folder": str(updated_tools.trusted_root) if updated_tools.trusted_root else None,
@@ -3019,6 +3155,8 @@ class SettingsDialog:
             voice_model=str(updated["voice_model"]),
             voice=str(updated["voice"]),
             mandarin_voice=str(updated["mandarin_voice"]),
+            voice_mode=str(updated["voice_mode"]),
+            single_voice=str(updated["single_voice"]),
             voice_speed=float(updated["voice_speed"]),
         )
         save_settings(updated)

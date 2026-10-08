@@ -44,7 +44,7 @@ Open **Settings** in the main window to see and test the exact local stack:
 - Microphone input and speaker output, including device refresh, a two-second microphone meter, and a spoken speaker test.
 - Any conversation/thinking model already installed in Ollama.
 - Whisper speech-to-text size, with an in-app download button for additional supported models.
-- Installed Kokoro voice model, separate English and Mandarin response-voice selectors with previews, language/gender labels, and voice speed.
+- Installed Kokoro voice model with either automatic English/Mandarin switching or one selected voice for the entire answer. The one-voice selector restores every installed American/British English, Spanish, French, Hindi, Italian, Japanese, Portuguese, and Chinese voice, with previews, language/gender labels, and voice speed.
 - Standard, Large, and Extra Large interface text sizes that apply throughout the app and persist locally.
 - An optional single trusted folder that replaces the private app workspace as the only file area the assistant can use.
 

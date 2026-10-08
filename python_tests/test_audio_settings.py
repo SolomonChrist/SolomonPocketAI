@@ -72,6 +72,8 @@ class AudioSettingsTest(unittest.TestCase):
             settings = dict(app.DEFAULT_SETTINGS)
             settings["voice"] = "am_michael"
             settings["mandarin_voice"] = "zm_yunxi"
+            settings["voice_mode"] = "single"
+            settings["single_voice"] = "ff_siwis"
             with (
                 mock.patch.object(app, "SETTINGS_FILE", settings_file),
                 mock.patch.object(app, "ensure_local_layout"),
@@ -80,6 +82,8 @@ class AudioSettingsTest(unittest.TestCase):
                 loaded = app.load_settings()
         self.assertEqual("am_michael", loaded["voice"])
         self.assertEqual("zm_yunxi", loaded["mandarin_voice"])
+        self.assertEqual("single", loaded["voice_mode"])
+        self.assertEqual("ff_siwis", loaded["single_voice"])
 
     def test_font_size_scaling_preserves_pixel_font_sign(self) -> None:
         self.assertEqual(13, app._scaled_font_size(10, 1.3))
@@ -289,6 +293,43 @@ class AudioSettingsTest(unittest.TestCase):
             [call.kwargs["lang"] for call in kokoro.create.call_args_list],
         )
         self.assertEqual("早上好 — ", engine._zh_g2p.call_args.args[0])
+
+    def test_one_voice_mode_does_not_split_a_mixed_language_answer(self) -> None:
+        kokoro = mock.Mock()
+        kokoro.create.return_value = (np.ones(240, dtype=np.float32), 24_000)
+        engine = app.VoiceEngines(
+            voice="af_heart",
+            mandarin_voice="zf_xiaoni",
+            voice_mode="single",
+            single_voice="ef_dora",
+        )
+        mixed_text = "Good morning — 早上好 — means good morning."
+        with mock.patch.object(engine, "load_kokoro", return_value=kokoro):
+            engine.synthesize(mixed_text)
+
+        kokoro.create.assert_called_once_with(
+            mixed_text,
+            voice="ef_dora",
+            speed=1.0,
+            lang="es",
+            is_phonemes=False,
+        )
+
+    def test_voice_catalog_includes_every_supported_kokoro_language(self) -> None:
+        self.assertEqual(
+            {
+                "American English",
+                "British English",
+                "Spanish",
+                "French",
+                "Hindi",
+                "Italian",
+                "Japanese",
+                "Portuguese",
+                "Chinese",
+            },
+            {language for language, _code in app.VOICE_LANGUAGES.values()},
+        )
 
     def test_mixed_language_synthesis_stops_before_the_next_voice_segment(self) -> None:
         cancel_event = threading.Event()

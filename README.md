@@ -27,8 +27,8 @@ Setup installs or verifies Git, the tested Python 3.11 runtime, all packages in 
 ## What it can do
 
 - Hold private spoken or typed conversations using `qwen3.5:4b` through local Ollama.
-- Detect and transcribe English or Mandarin microphone input with local Whisper, then automatically speak each answer with the matching local Kokoro voice.
-- Practice languages with mixed English-and-Mandarin replies that switch between the configured voices inside the same spoken answer.
+- Detect and transcribe English or the language selected in the active voice pair with local Whisper, then speak each answer with the matching local Kokoro voice.
+- Practice languages with mixed English plus Chinese/Mandarin, Spanish, French, Hindi, Italian, Japanese, or Portuguese replies. Labeled lesson segments switch between the two configured voices inside the same spoken answer.
 - Stream speech through one continuous audio connection while the next phrase renders ahead, avoiding stop-and-restart gaps between generated sentences.
 - Stop active or queued speech immediately with **Stop voice**.
 - Replay the three most recent spoken responses instantly from the local audio cache.
@@ -44,7 +44,7 @@ Open **Settings** in the main window to see and test the exact local stack:
 - Microphone input and speaker output, including device refresh, a two-second microphone meter, and a spoken speaker test.
 - Any conversation/thinking model already installed in Ollama.
 - Whisper speech-to-text size, with an in-app download button for additional supported models.
-- Installed Kokoro voice model with either automatic English/Mandarin switching or one selected voice for the entire answer. The one-voice selector restores every installed American/British English, Spanish, French, Hindi, Italian, Japanese, Portuguese, and Chinese voice, with previews, language/gender labels, and voice speed.
+- Installed Kokoro voice model with an English-plus-language playback pair or one selected voice for the entire answer. Every supported pair remembers its learning-language voice, while the master one-voice selector can use any installed American/British English, Spanish, French, Hindi, Italian, Japanese, Portuguese, or Chinese voice. Settings include local previews, language/gender labels, and voice speed.
 - Standard, Large, and Extra Large interface text sizes that apply throughout the app and persist locally.
 - An optional single trusted folder that replaces the private app workspace as the only file area the assistant can use.
 

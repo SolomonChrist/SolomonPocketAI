@@ -62,8 +62,50 @@ FONT_SCALE_CHOICES = {
     "Extra large (130%)": 1.3,
 }
 VOICE_MODE_CHOICES = {
-    "Automatic English / Mandarin": "auto",
+    "English + Chinese / Mandarin": "dual:z",
+    "English + Spanish": "dual:e",
+    "English + French": "dual:f",
+    "English + Hindi": "dual:h",
+    "English + Italian": "dual:i",
+    "English + Japanese": "dual:j",
+    "English + Portuguese": "dual:p",
     "One voice for everything": "single",
+}
+SECONDARY_LANGUAGE_NAMES = {
+    "z": "Chinese / Mandarin",
+    "e": "Spanish",
+    "f": "French",
+    "h": "Hindi",
+    "i": "Italian",
+    "j": "Japanese",
+    "p": "Portuguese",
+}
+SECONDARY_LANGUAGE_LABELS = {
+    "z": ("Chinese", "Mandarin"),
+    "e": ("Spanish",),
+    "f": ("French",),
+    "h": ("Hindi",),
+    "i": ("Italian",),
+    "j": ("Japanese",),
+    "p": ("Portuguese",),
+}
+SECONDARY_DEFAULT_VOICES = {
+    "z": "zf_xiaoni",
+    "e": "ef_dora",
+    "f": "ff_siwis",
+    "h": "hf_alpha",
+    "i": "if_sara",
+    "j": "jf_alpha",
+    "p": "pf_dora",
+}
+WHISPER_LANGUAGE_CODES = {
+    "z": "zh",
+    "e": "es",
+    "f": "fr",
+    "h": "hi",
+    "i": "it",
+    "j": "ja",
+    "p": "pt",
 }
 DEFAULT_SETTINGS = {
     "max_input_seconds": 15,
@@ -77,8 +119,8 @@ DEFAULT_SETTINGS = {
     "whisper_model": "tiny",
     "voice_model": KOKORO_MODEL.name,
     "voice": "af_heart",
-    "mandarin_voice": "zf_xiaoni",
-    "voice_mode": "auto",
+    "secondary_voices": dict(SECONDARY_DEFAULT_VOICES),
+    "voice_mode": "dual:z",
     "single_voice": "af_heart",
     "voice_speed": 1.0,
     "interface_scale": 1.0,
@@ -114,10 +156,11 @@ SYSTEM_PROMPT = (
     "Never use markdown asterisks; use plain sentences or hyphen bullets. Have a natural, "
     "thoughtful conversation. Be warm and direct. Default to two or three short "
     "spoken sentences unless the user asks for depth. When the user asks for bilingual "
-    "English and Mandarin practice, every teaching answer must contain both English words "
-    "and actual Simplified Chinese characters in short paired examples that are natural to "
-    "hear aloud. Pinyin may be additional help, but it must not replace the Chinese characters. "
-    "Give accurate standard translations and do not invent literal etymologies."
+    "language practice, every teaching answer must contain both English and the requested "
+    "learning language in short paired examples that are natural to hear aloud. Use the "
+    "learning language's native writing system. Pronunciation guides may be additional help, "
+    "but must not replace native text. Give accurate standard translations and do not invent "
+    "literal etymologies."
 )
 
 
@@ -319,6 +362,7 @@ def load_settings() -> dict[str, object]:
     except (OSError, ValueError, TypeError):
         loaded = {}
     settings = dict(DEFAULT_SETTINGS)
+    settings["secondary_voices"] = dict(SECONDARY_DEFAULT_VOICES)
     for key in ("max_input_seconds", "max_reply_seconds"):
         candidate = loaded.get(key)
         if candidate in VALID_SECONDS:
@@ -332,7 +376,6 @@ def load_settings() -> dict[str, object]:
         "whisper_model",
         "voice_model",
         "voice",
-        "mandarin_voice",
         "single_voice",
     ):
         candidate = loaded.get(key)
@@ -340,8 +383,22 @@ def load_settings() -> dict[str, object]:
             settings[key] = candidate.strip()
     if "single_voice" not in loaded:
         settings["single_voice"] = settings["voice"]
+    saved_secondary_voices = loaded.get("secondary_voices")
+    if isinstance(saved_secondary_voices, dict):
+        for prefix, voice_name in saved_secondary_voices.items():
+            if prefix in SECONDARY_LANGUAGE_NAMES and isinstance(voice_name, str) and voice_name.startswith(prefix):
+                settings["secondary_voices"][prefix] = voice_name
+    legacy_mandarin_voice = loaded.get("mandarin_voice")
+    if (
+        "secondary_voices" not in loaded
+        and isinstance(legacy_mandarin_voice, str)
+        and legacy_mandarin_voice.startswith("z")
+    ):
+        settings["secondary_voices"]["z"] = legacy_mandarin_voice
     candidate_voice_mode = loaded.get("voice_mode")
-    if candidate_voice_mode in VOICE_MODE_CHOICES.values():
+    if candidate_voice_mode == "auto":
+        settings["voice_mode"] = "dual:z"
+    elif candidate_voice_mode in VOICE_MODE_CHOICES.values():
         settings["voice_mode"] = candidate_voice_mode
     candidate_speed = loaded.get("voice_speed")
     if isinstance(candidate_speed, (int, float)) and 0.5 <= float(candidate_speed) <= 2.0:
@@ -368,11 +425,16 @@ def save_settings(settings: dict[str, object]) -> None:
         "whisper_model",
         "voice_model",
         "voice",
-        "mandarin_voice",
         "single_voice",
     ):
         candidate = settings.get(key)
         clean[key] = str(candidate).strip() if isinstance(candidate, str) and candidate.strip() else DEFAULT_SETTINGS[key]
+    candidate_secondary_voices = settings.get("secondary_voices")
+    clean["secondary_voices"] = dict(SECONDARY_DEFAULT_VOICES)
+    if isinstance(candidate_secondary_voices, dict):
+        for prefix, voice_name in candidate_secondary_voices.items():
+            if prefix in SECONDARY_LANGUAGE_NAMES and isinstance(voice_name, str) and voice_name.startswith(prefix):
+                clean["secondary_voices"][prefix] = voice_name
     candidate_voice_mode = settings.get("voice_mode")
     clean["voice_mode"] = (
         str(candidate_voice_mode)
@@ -616,10 +678,22 @@ def voice_display_name(voice: str) -> str:
     return f"{friendly} - {language}, {gender} ({voice})"
 
 
+VOICE_PREVIEW_TEXT = {
+    "z": "你好，这是所罗门口袋人工智能的中文语音测试。",
+    "e": "Hola, esta es la prueba de voz en español de Solomon Pocket AI.",
+    "f": "Bonjour, ceci est le test de la voix française de Solomon Pocket AI.",
+    "h": "नमस्ते, यह सोलोमन पॉकेट एआई की हिंदी आवाज़ का परीक्षण है।",
+    "i": "Ciao, questa è la prova della voce italiana di Solomon Pocket AI.",
+    "j": "こんにちは。これはソロモン・ポケットAIの日本語音声テストです。",
+    "p": "Olá, este é o teste da voz em português do Solomon Pocket AI.",
+}
+
+
 def voice_preview_text(voice: str) -> str:
-    if voice.startswith("z"):
-        return "你好，这是所罗门口袋人工智能的中文语音测试。"
-    return "This is the selected Solomon Pocket AI voice and speaker output."
+    return VOICE_PREVIEW_TEXT.get(
+        voice[:1],
+        "This is the selected Solomon Pocket AI voice and speaker output.",
+    )
 
 
 def cjk_character_count(text: str) -> int:
@@ -633,14 +707,35 @@ def spoken_language_for_text(text: str) -> str:
     return "zh" if cjk_count >= 2 and cjk_count * 2 >= latin_count else "en"
 
 
-def spoken_language_segments(text: str) -> list[tuple[str, str]]:
-    """Split mixed English/Mandarin text without dropping spaces or punctuation."""
+def voice_mode_secondary_prefix(voice_mode: str) -> str:
+    if voice_mode.startswith("dual:") and voice_mode[5:] in SECONDARY_LANGUAGE_NAMES:
+        return voice_mode[5:]
+    return "z"
+
+
+def _secondary_character_language(character: str, secondary_language: str) -> str | None:
+    codepoint = ord(character)
+    if secondary_language == "z" and (0x3400 <= codepoint <= 0x4DBF or 0x4E00 <= codepoint <= 0x9FFF):
+        return "z"
+    if secondary_language == "j" and (
+        0x3040 <= codepoint <= 0x30FF
+        or 0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+    ):
+        return "j"
+    if secondary_language == "h" and 0x0900 <= codepoint <= 0x097F:
+        return "h"
+    return None
+
+
+def _script_language_segments(text: str, secondary_language: str) -> list[tuple[str, str]]:
     segments: list[tuple[str, str]] = []
     buffer: list[str] = []
     language: str | None = None
     for character in text:
-        if re.match(r"[\u3400-\u4dbf\u4e00-\u9fff]", character):
-            character_language = "zh"
+        secondary_character = _secondary_character_language(character, secondary_language)
+        if secondary_character:
+            character_language = secondary_character
         elif character.isalpha():
             character_language = "en"
         else:
@@ -661,6 +756,31 @@ def spoken_language_segments(text: str) -> list[tuple[str, str]]:
     return segments
 
 
+def spoken_language_segments(text: str, secondary_language: str = "z") -> list[tuple[str, str]]:
+    """Route labeled pairs, plus distinct native scripts, to the selected two voices."""
+    secondary_language = secondary_language if secondary_language in SECONDARY_LANGUAGE_NAMES else "z"
+    labels = ("English", *SECONDARY_LANGUAGE_LABELS[secondary_language])
+    label_pattern = re.compile(
+        rf"(?i)(?<![\w])({'|'.join(re.escape(label) for label in labels)})\s*:\s*"
+    )
+    matches = list(label_pattern.finditer(text))
+    if not matches:
+        return _script_language_segments(text, secondary_language)
+
+    segments: list[tuple[str, str]] = []
+    leading_text = text[: matches[0].start()]
+    if any(character.isalnum() for character in leading_text):
+        segments.extend(_script_language_segments(leading_text, secondary_language))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        speech_text = text[match.end() : end]
+        speech_text = re.sub(r"(?:\s*(?:[/|]|\n\s*[-•]))+\s*$", "", speech_text)
+        if speech_text.strip():
+            language = "en" if match.group(1).casefold() == "english" else secondary_language
+            segments.append((language, speech_text))
+    return segments
+
+
 def build_turn_prompt(reply_seconds: int) -> str:
     reply_seconds = reply_seconds if reply_seconds in VALID_SECONDS else DEFAULT_SETTINGS["max_reply_seconds"]
     target_words = max(10, round(reply_seconds * 2.4))
@@ -676,8 +796,12 @@ def build_turn_prompt(reply_seconds: int) -> str:
     )
 
 
-def bilingual_mandarin_mode(messages: list[dict[str, str]]) -> bool:
-    """Track an explicit English/Mandarin learning request in recent user turns."""
+def bilingual_learning_mode(
+    messages: list[dict[str, str]], secondary_language: str = "z"
+) -> bool:
+    """Track an explicit English/selected-language learning request."""
+    secondary_language = secondary_language if secondary_language in SECONDARY_LANGUAGE_NAMES else "z"
+    aliases = tuple(name.casefold() for name in SECONDARY_LANGUAGE_LABELS[secondary_language])
     enabled = False
     for message in messages[-12:]:
         if message.get("role") != "user":
@@ -687,8 +811,7 @@ def bilingual_mandarin_mode(messages: list[dict[str, str]]) -> bool:
             phrase in text
             for phrase in (
                 "english only",
-                "chinese only",
-                "mandarin only",
+                *(f"{alias} only" for alias in aliases),
                 "stop bilingual",
                 "stop language practice",
                 "end language practice",
@@ -696,7 +819,7 @@ def bilingual_mandarin_mode(messages: list[dict[str, str]]) -> bool:
         ):
             enabled = False
             continue
-        names_both_languages = "english" in text and ("chinese" in text or "mandarin" in text)
+        names_both_languages = "english" in text and any(alias in text for alias in aliases)
         requests_mixed_practice = any(
             cue in text
             for cue in ("bilingual", "both", "mix", "learn", "practice", "teach", "translate")
@@ -704,6 +827,11 @@ def bilingual_mandarin_mode(messages: list[dict[str, str]]) -> bool:
         if names_both_languages and requests_mixed_practice:
             enabled = True
     return enabled
+
+
+def bilingual_mandarin_mode(messages: list[dict[str, str]]) -> bool:
+    """Backward-compatible helper for existing integrations."""
+    return bilingual_learning_mode(messages, "z")
 
 
 INTERNAL_GUIDANCE_FRAGMENTS = (
@@ -745,6 +873,7 @@ def ollama_chat_stream(
     on_chunk=None,
     reply_seconds: int = DEFAULT_SETTINGS["max_reply_seconds"],
     image_bytes: bytes | None = None,
+    secondary_language: str = "z",
 ) -> tuple[str, dict[str, float]]:
     reply_seconds = reply_seconds if reply_seconds in VALID_SECONDS else DEFAULT_SETTINGS["max_reply_seconds"]
     turn_prompt = build_turn_prompt(reply_seconds)
@@ -752,14 +881,18 @@ def ollama_chat_stream(
         {"role": "system", "content": turn_prompt},
         *[dict(message) for message in messages[-12:]],
     ]
-    is_bilingual_lesson = bilingual_mandarin_mode(messages)
+    secondary_language = secondary_language if secondary_language in SECONDARY_LANGUAGE_NAMES else "z"
+    learning_language = SECONDARY_LANGUAGE_LABELS[secondary_language][0]
+    is_bilingual_lesson = bilingual_learning_mode(messages, secondary_language)
     if is_bilingual_lesson and api_messages[-1].get("role") == "user":
         api_messages[-1]["content"] = (
             str(api_messages[-1].get("content", ""))
-            + "\n\nBilingual learning output requirement: include both natural English and actual "
-            "Simplified Chinese characters in this answer. Use short paired examples. "
-            "Pinyin is optional and cannot replace the Chinese characters. Give exactly "
-            "the number of examples requested and do not add unrelated phrases."
+            + f"\n\nBilingual learning output requirement: include both natural English and "
+            f"{learning_language} in this answer. Put every spoken segment on its own line, "
+            f"prefixed exactly 'English:' or '{learning_language}:'. Use short paired examples "
+            f"in the native {learning_language} writing system. A pronunciation guide is optional "
+            "and cannot replace native text. Give exactly the number of examples requested and "
+            "do not add unrelated phrases."
         )
     if image_bytes:
         if not api_messages or api_messages[-1].get("role") != "user":
@@ -947,10 +1080,12 @@ class VoiceEngines:
         whisper_model: str = "tiny",
         voice_model: str = KOKORO_MODEL.name,
         voice: str = "af_heart",
-        mandarin_voice: str = "zf_xiaoni",
-        voice_mode: str = "auto",
+        secondary_language: str = "z",
+        secondary_voice: str | None = None,
+        voice_mode: str = "dual:z",
         single_voice: str = "af_heart",
         voice_speed: float = 1.0,
+        mandarin_voice: str | None = None,
     ) -> None:
         self._whisper = None
         self._kokoro = None
@@ -961,7 +1096,17 @@ class VoiceEngines:
         self.whisper_model = whisper_model
         self.voice_model = voice_model
         self.voice = voice
-        self.mandarin_voice = mandarin_voice
+        mode_secondary_language = voice_mode_secondary_prefix(voice_mode)
+        self.secondary_language = (
+            mode_secondary_language
+            if voice_mode.startswith("dual:")
+            else secondary_language if secondary_language in SECONDARY_LANGUAGE_NAMES else "z"
+        )
+        self.secondary_voice = (
+            secondary_voice
+            or mandarin_voice
+            or SECONDARY_DEFAULT_VOICES[self.secondary_language]
+        )
         self.voice_mode = voice_mode
         self.single_voice = single_voice
         self.voice_speed = voice_speed
@@ -1013,9 +1158,10 @@ class VoiceEngines:
             ).to(model.device)
             try:
                 _language_token, probabilities = model.detect_language(mel)
+                secondary_code = WHISPER_LANGUAGE_CODES[self.secondary_language]
                 language = (
-                    "zh"
-                    if float(probabilities.get("zh", 0.0)) > float(probabilities.get("en", 0.0))
+                    secondary_code
+                    if float(probabilities.get(secondary_code, 0.0)) > float(probabilities.get("en", 0.0))
                     else "en"
                 )
             except ValueError:
@@ -1046,7 +1192,7 @@ class VoiceEngines:
         speech_segments = (
             [("single", text[:1800])]
             if self.voice_mode == "single"
-            else spoken_language_segments(text[:1800])
+            else spoken_language_segments(text[:1800], self.secondary_language)
         )
         for language, speech_text in speech_segments:
             if cancel_event is not None and cancel_event.is_set():
@@ -1054,7 +1200,7 @@ class VoiceEngines:
             if language == "single":
                 selected_voice = self.single_voice
             else:
-                selected_voice = self.mandarin_voice if language == "zh" else self.voice
+                selected_voice = self.secondary_voice if language != "en" else self.voice
             samples, sample_rate = self._synthesize_segment(kokoro, speech_text, selected_voice)
             if cancel_event is not None and cancel_event.is_set():
                 break
@@ -1148,7 +1294,8 @@ class VoiceEngines:
         whisper_model: str,
         voice_model: str,
         voice: str,
-        mandarin_voice: str,
+        secondary_language: str,
+        secondary_voice: str,
         voice_mode: str,
         single_voice: str,
         voice_speed: float,
@@ -1161,7 +1308,10 @@ class VoiceEngines:
             self._kokoro = None
             self.voice_model = voice_model
         self.voice = voice
-        self.mandarin_voice = mandarin_voice
+        self.secondary_language = (
+            secondary_language if secondary_language in SECONDARY_LANGUAGE_NAMES else "z"
+        )
+        self.secondary_voice = secondary_voice
         self.voice_mode = voice_mode
         self.single_voice = single_voice
         self.voice_speed = voice_speed
@@ -1350,13 +1500,16 @@ class SolomonPocketAIApp:
         self.settings = load_settings()
         configure_ui_font_scale(root, float(self.settings.get("interface_scale", 1.0)))
         OLLAMA_MODEL = str(self.settings.get("language_model", OLLAMA_MODEL))
+        active_secondary = voice_mode_secondary_prefix(str(self.settings.get("voice_mode", "dual:z")))
+        secondary_voices = self.settings.get("secondary_voices", SECONDARY_DEFAULT_VOICES)
         self.engines = VoiceEngines(
             output_device=self.settings.get("output_device"),
             whisper_model=str(self.settings.get("whisper_model", "tiny")),
             voice_model=str(self.settings.get("voice_model", KOKORO_MODEL.name)),
             voice=str(self.settings.get("voice", "af_heart")),
-            mandarin_voice=str(self.settings.get("mandarin_voice", "zf_xiaoni")),
-            voice_mode=str(self.settings.get("voice_mode", "auto")),
+            secondary_language=active_secondary,
+            secondary_voice=str(secondary_voices.get(active_secondary, SECONDARY_DEFAULT_VOICES[active_secondary])),
+            voice_mode=str(self.settings.get("voice_mode", "dual:z")),
             single_voice=str(self.settings.get("single_voice", self.settings.get("voice", "af_heart"))),
             voice_speed=float(self.settings.get("voice_speed", 1.0)),
         )
@@ -1675,12 +1828,16 @@ class SolomonPocketAIApp:
         self.transcript.see(tk.END)
 
     def _update_limits_label(self) -> None:
-        if self.settings.get("voice_mode", "auto") == "single":
+        voice_mode = str(self.settings.get("voice_mode", "dual:z"))
+        if voice_mode == "single":
             voice_summary = f"Kokoro single {self.settings.get('single_voice', 'af_heart')}"
         else:
+            secondary_language = voice_mode_secondary_prefix(voice_mode)
+            secondary_voices = self.settings.get("secondary_voices", SECONDARY_DEFAULT_VOICES)
             voice_summary = (
-                f"Kokoro auto EN {self.settings.get('voice', 'af_heart')} / "
-                f"ZH {self.settings.get('mandarin_voice', 'zf_xiaoni')}"
+                f"Kokoro EN {self.settings.get('voice', 'af_heart')} + "
+                f"{SECONDARY_LANGUAGE_NAMES[secondary_language]} "
+                f"{secondary_voices.get(secondary_language, SECONDARY_DEFAULT_VOICES[secondary_language])}"
             )
         self.subtitle.configure(
             text=(
@@ -2187,6 +2344,7 @@ class SolomonPocketAIApp:
                 on_chunk=stream_callback,
                 reply_seconds=self.settings["max_reply_seconds"],
                 image_bytes=image_bytes,
+                secondary_language=self.engines.secondary_language,
             )
             if grounded_tool_response:
                 response = sanitize_grounded_response(response)
@@ -2509,10 +2667,8 @@ class SettingsDialog:
 
         self.voice_names = installed_voice_names()
         english_names = [name for name in self.voice_names if name.startswith(("a", "b"))]
-        mandarin_names = [name for name in self.voice_names if name.startswith("z")]
         self.all_voice_by_label = {voice_display_name(name): name for name in self.voice_names}
         self.voice_by_label = {voice_display_name(name): name for name in english_names}
-        self.mandarin_voice_by_label = {voice_display_name(name): name for name in mandarin_names}
         current_voice = str(app.settings.get("voice", "af_heart"))
         current_voice_label = next(
             (label for label, name in self.voice_by_label.items() if name == current_voice),
@@ -2521,20 +2677,35 @@ class SettingsDialog:
         if current_voice_label not in self.voice_by_label:
             self.voice_by_label[current_voice_label] = current_voice
         self.voice_var = tk.StringVar(value=current_voice_label)
-        current_mandarin_voice = str(app.settings.get("mandarin_voice", "zf_xiaoni"))
-        current_mandarin_label = next(
-            (label for label, name in self.mandarin_voice_by_label.items() if name == current_mandarin_voice),
-            voice_display_name(current_mandarin_voice),
-        )
-        if current_mandarin_label not in self.mandarin_voice_by_label:
-            self.mandarin_voice_by_label[current_mandarin_label] = current_mandarin_voice
-        self.mandarin_voice_var = tk.StringVar(value=current_mandarin_label)
-        current_voice_mode = str(app.settings.get("voice_mode", "auto"))
+        saved_secondary_voices = app.settings.get("secondary_voices", SECONDARY_DEFAULT_VOICES)
+        self.secondary_voices = dict(SECONDARY_DEFAULT_VOICES)
+        if isinstance(saved_secondary_voices, dict):
+            self.secondary_voices.update(saved_secondary_voices)
+        current_voice_mode = str(app.settings.get("voice_mode", "dual:z"))
         current_voice_mode_label = next(
             (label for label, mode in VOICE_MODE_CHOICES.items() if mode == current_voice_mode),
-            "Automatic English / Mandarin",
+            "English + Chinese / Mandarin",
         )
         self.voice_mode_var = tk.StringVar(value=current_voice_mode_label)
+        self.active_secondary_language = voice_mode_secondary_prefix(current_voice_mode)
+        secondary_names = [
+            name for name in self.voice_names if name.startswith(self.active_secondary_language)
+        ]
+        self.secondary_voice_by_label = {
+            voice_display_name(name): name for name in secondary_names
+        }
+        current_secondary_voice = self.secondary_voices[self.active_secondary_language]
+        current_secondary_label = next(
+            (
+                label
+                for label, name in self.secondary_voice_by_label.items()
+                if name == current_secondary_voice
+            ),
+            voice_display_name(current_secondary_voice),
+        )
+        if current_secondary_label not in self.secondary_voice_by_label:
+            self.secondary_voice_by_label[current_secondary_label] = current_secondary_voice
+        self.secondary_voice_var = tk.StringVar(value=current_secondary_label)
         current_single_voice = str(app.settings.get("single_voice", current_voice))
         current_single_label = next(
             (label for label, name in self.all_voice_by_label.items() if name == current_single_voice),
@@ -2731,13 +2902,13 @@ class SettingsDialog:
             self.voice_mode_var,
             list(VOICE_MODE_CHOICES),
         )
-        self.voice_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_voice_mode_controls())
+        self.voice_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._voice_mode_changed())
         tk.Label(
             self.voice_tab,
             text=(
-                "Automatic mode switches between the English and Mandarin voices inside mixed replies. "
-                "One-voice mode uses the selected installed voice for the entire answer. For natural "
-                "pronunciation in one-voice mode, also ask the conversation to use that one language."
+                "Choose any English + learning-language pair to switch voices inside labeled or mixed-script "
+                "replies. Each language remembers its own voice. One-voice mode is the master override and "
+                "uses one selected installed voice for the entire answer."
             ),
             wraplength=680,
             justify=tk.LEFT,
@@ -2752,12 +2923,12 @@ class SettingsDialog:
             self.voice_var,
             list(self.voice_by_label),
         )
-        self.mandarin_voice_combo = self._field(
+        self.secondary_voice_combo = self._field(
             self.voice_tab,
             5,
-            "Mandarin response voice",
-            self.mandarin_voice_var,
-            list(self.mandarin_voice_by_label),
+            "Selected learning-language response voice",
+            self.secondary_voice_var,
+            list(self.secondary_voice_by_label),
         )
         self.single_voice_combo = self._field(
             self.voice_tab,
@@ -2793,17 +2964,17 @@ class SettingsDialog:
             pady=6,
         )
         self.preview_button.pack(side=tk.LEFT)
-        self.mandarin_preview_button = tk.Button(
+        self.secondary_preview_button = tk.Button(
             voice_controls,
-            text="Preview Mandarin",
-            command=lambda: self.test_speaker("zh"),
+            text=f"Preview {SECONDARY_LANGUAGE_NAMES[self.active_secondary_language]}",
+            command=lambda: self.test_speaker("secondary"),
             bg="#0d7c70",
             fg="#ffffff",
             relief=tk.FLAT,
             padx=12,
             pady=6,
         )
-        self.mandarin_preview_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.secondary_preview_button.pack(side=tk.LEFT, padx=(8, 0))
         self.single_preview_button = tk.Button(
             voice_controls,
             text="Preview one voice",
@@ -2817,14 +2988,43 @@ class SettingsDialog:
         self.single_preview_button.pack(side=tk.LEFT, padx=(8, 0))
         self._update_voice_mode_controls()
 
+    def _voice_mode_changed(self) -> None:
+        selected_voice = self.secondary_voice_by_label.get(self.secondary_voice_var.get())
+        if selected_voice:
+            self.secondary_voices[self.active_secondary_language] = selected_voice
+        selected_mode = VOICE_MODE_CHOICES.get(self.voice_mode_var.get(), "dual:z")
+        self.active_secondary_language = voice_mode_secondary_prefix(selected_mode)
+        names = [name for name in self.voice_names if name.startswith(self.active_secondary_language)]
+        self.secondary_voice_by_label = {voice_display_name(name): name for name in names}
+        selected_voice = self.secondary_voices.get(
+            self.active_secondary_language,
+            SECONDARY_DEFAULT_VOICES[self.active_secondary_language],
+        )
+        if selected_voice not in self.secondary_voice_by_label.values() and names:
+            selected_voice = names[0]
+            self.secondary_voices[self.active_secondary_language] = selected_voice
+        selected_label = next(
+            (
+                label
+                for label, voice_name in self.secondary_voice_by_label.items()
+                if voice_name == selected_voice
+            ),
+            voice_display_name(selected_voice),
+        )
+        self.secondary_voice_var.set(selected_label)
+        self.secondary_voice_combo.configure(values=list(self.secondary_voice_by_label))
+        language_name = SECONDARY_LANGUAGE_NAMES[self.active_secondary_language]
+        self.secondary_preview_button.configure(text=f"Preview {language_name}")
+        self._update_voice_mode_controls()
+
     def _update_voice_mode_controls(self) -> None:
-        single_mode = VOICE_MODE_CHOICES.get(self.voice_mode_var.get(), "auto") == "single"
+        single_mode = VOICE_MODE_CHOICES.get(self.voice_mode_var.get(), "dual:z") == "single"
         self.english_voice_combo.configure(state="disabled" if single_mode else "readonly")
-        self.mandarin_voice_combo.configure(state="disabled" if single_mode else "readonly")
+        self.secondary_voice_combo.configure(state="disabled" if single_mode else "readonly")
         self.single_voice_combo.configure(state="readonly" if single_mode else "disabled")
         if not self.busy:
             self.preview_button.configure(state=tk.DISABLED if single_mode else tk.NORMAL)
-            self.mandarin_preview_button.configure(state=tk.DISABLED if single_mode else tk.NORMAL)
+            self.secondary_preview_button.configure(state=tk.DISABLED if single_mode else tk.NORMAL)
             self.single_preview_button.configure(state=tk.NORMAL if single_mode else tk.DISABLED)
 
     def _build_appearance_tab(self) -> None:
@@ -2968,7 +3168,7 @@ class SettingsDialog:
             self.speaker_test_button,
             self.download_whisper_button,
             self.preview_button,
-            self.mandarin_preview_button,
+            self.secondary_preview_button,
             self.single_preview_button,
             self.choose_folder_button,
             self.use_app_folder_button,
@@ -3039,8 +3239,11 @@ class SettingsDialog:
         if self.busy:
             return
         output_device = self.output_by_label.get(self.output_var.get())
-        if language == "zh":
-            voice = self.mandarin_voice_by_label.get(self.mandarin_voice_var.get(), "zf_xiaoni")
+        if language == "secondary":
+            voice = self.secondary_voice_by_label.get(
+                self.secondary_voice_var.get(),
+                SECONDARY_DEFAULT_VOICES[self.active_secondary_language],
+            )
         elif language == "single" or VOICE_MODE_CHOICES.get(self.voice_mode_var.get()) == "single":
             voice = self.all_voice_by_label.get(self.single_voice_var.get(), "af_heart")
         else:
@@ -3055,7 +3258,8 @@ class SettingsDialog:
                     output_device=output_device,
                     voice_model=voice_model,
                     voice=voice,
-                    mandarin_voice=voice,
+                    secondary_language=voice[:1],
+                    secondary_voice=voice,
                     voice_mode="single",
                     single_voice=voice,
                     voice_speed=voice_speed,
@@ -3126,6 +3330,11 @@ class SettingsDialog:
             return
 
         updated = dict(self.app.settings)
+        selected_secondary_voice = self.secondary_voice_by_label.get(
+            self.secondary_voice_var.get(),
+            SECONDARY_DEFAULT_VOICES[self.active_secondary_language],
+        )
+        self.secondary_voices[self.active_secondary_language] = selected_secondary_voice
         updated.update(
             {
                 "input_device": self.input_by_label.get(self.input_var.get()),
@@ -3134,10 +3343,8 @@ class SettingsDialog:
                 "whisper_model": whisper_model,
                 "voice_model": voice_model,
                 "voice": self.voice_by_label.get(self.voice_var.get(), "af_heart"),
-                "mandarin_voice": self.mandarin_voice_by_label.get(
-                    self.mandarin_voice_var.get(), "zf_xiaoni"
-                ),
-                "voice_mode": VOICE_MODE_CHOICES.get(self.voice_mode_var.get(), "auto"),
+                "secondary_voices": dict(self.secondary_voices),
+                "voice_mode": VOICE_MODE_CHOICES.get(self.voice_mode_var.get(), "dual:z"),
                 "single_voice": self.all_voice_by_label.get(
                     self.single_voice_var.get(), "af_heart"
                 ),
@@ -3149,12 +3356,14 @@ class SettingsDialog:
         self.app.settings = updated
         self.app.tools = updated_tools
         OLLAMA_MODEL = str(updated["language_model"])
+        active_secondary = voice_mode_secondary_prefix(str(updated["voice_mode"]))
         self.app.engines.configure(
             output_device=updated["output_device"],
             whisper_model=str(updated["whisper_model"]),
             voice_model=str(updated["voice_model"]),
             voice=str(updated["voice"]),
-            mandarin_voice=str(updated["mandarin_voice"]),
+            secondary_language=active_secondary,
+            secondary_voice=str(updated["secondary_voices"][active_secondary]),
             voice_mode=str(updated["voice_mode"]),
             single_voice=str(updated["single_voice"]),
             voice_speed=float(updated["voice_speed"]),
@@ -3320,6 +3529,7 @@ class SpeedSetupDialog:
                 [{"role": "user", "content": transcript}],
                 on_chunk=speaker.feed,
                 reply_seconds=reply_seconds,
+                secondary_language=self.app.engines.secondary_language,
             )
             self.app.root.after(0, lambda: self.status.set("Streaming the reply. Judge whether it feels natural…"))
             voice_timing = speaker.finish()

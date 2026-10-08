@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 import tempfile
 import queue
@@ -40,6 +41,7 @@ class AudioSettingsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             settings_file = Path(temporary) / "settings.json"
             settings = dict(app.DEFAULT_SETTINGS)
+            settings["secondary_voices"] = dict(app.SECONDARY_DEFAULT_VOICES)
             settings["interface_scale"] = 1.3
             with (
                 mock.patch.object(app, "SETTINGS_FILE", settings_file),
@@ -66,12 +68,14 @@ class AudioSettingsTest(unittest.TestCase):
                 app.save_settings(settings)
                 self.assertEqual(str(trusted_folder), app.load_settings()["trusted_folder"])
 
-    def test_english_and_mandarin_voices_are_persisted_separately(self) -> None:
+    def test_english_secondary_and_single_voices_are_persisted_separately(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             settings_file = Path(temporary) / "settings.json"
             settings = dict(app.DEFAULT_SETTINGS)
+            settings["secondary_voices"] = dict(app.SECONDARY_DEFAULT_VOICES)
             settings["voice"] = "am_michael"
-            settings["mandarin_voice"] = "zm_yunxi"
+            settings["secondary_voices"]["z"] = "zm_yunxi"
+            settings["secondary_voices"]["e"] = "em_alex"
             settings["voice_mode"] = "single"
             settings["single_voice"] = "ff_siwis"
             with (
@@ -81,7 +85,8 @@ class AudioSettingsTest(unittest.TestCase):
                 app.save_settings(settings)
                 loaded = app.load_settings()
         self.assertEqual("am_michael", loaded["voice"])
-        self.assertEqual("zm_yunxi", loaded["mandarin_voice"])
+        self.assertEqual("zm_yunxi", loaded["secondary_voices"]["z"])
+        self.assertEqual("em_alex", loaded["secondary_voices"]["e"])
         self.assertEqual("single", loaded["voice_mode"])
         self.assertEqual("ff_siwis", loaded["single_voice"])
 
@@ -246,7 +251,7 @@ class AudioSettingsTest(unittest.TestCase):
 
         kokoro = mock.Mock()
         kokoro.create.return_value = (np.ones(240, dtype=np.float32), 24_000)
-        engine = app.VoiceEngines(voice="af_heart", mandarin_voice="zf_xiaoni")
+        engine = app.VoiceEngines(voice="af_heart", secondary_voice="zf_xiaoni")
         engine._zh_g2p = mock.Mock(return_value=("mandarin phonemes", []))
         with mock.patch.object(engine, "load_kokoro", return_value=kokoro):
             engine.synthesize("Hello, Solomon.")
@@ -264,7 +269,7 @@ class AudioSettingsTest(unittest.TestCase):
         self.assertEqual(
             [
                 ("en", "Good morning — "),
-                ("zh", "早上好 — "),
+                ("z", "早上好 — "),
                 ("en", "means good morning."),
             ],
             app.spoken_language_segments("Good morning — 早上好 — means good morning."),
@@ -275,7 +280,7 @@ class AudioSettingsTest(unittest.TestCase):
             (np.full(160, 2.0, dtype=np.float32), 24_000),
             (np.full(200, 3.0, dtype=np.float32), 24_000),
         )
-        engine = app.VoiceEngines(voice="af_heart", mandarin_voice="zf_xiaoni")
+        engine = app.VoiceEngines(voice="af_heart", secondary_voice="zf_xiaoni")
         engine._zh_g2p = mock.Mock(return_value=("mandarin phonemes", []))
         with mock.patch.object(engine, "load_kokoro", return_value=kokoro):
             samples, sample_rate = engine.synthesize(
@@ -299,7 +304,7 @@ class AudioSettingsTest(unittest.TestCase):
         kokoro.create.return_value = (np.ones(240, dtype=np.float32), 24_000)
         engine = app.VoiceEngines(
             voice="af_heart",
-            mandarin_voice="zf_xiaoni",
+            secondary_voice="zf_xiaoni",
             voice_mode="single",
             single_voice="ef_dora",
         )
@@ -331,6 +336,71 @@ class AudioSettingsTest(unittest.TestCase):
             {language for language, _code in app.VOICE_LANGUAGES.values()},
         )
 
+    def test_every_non_english_language_has_a_dual_playback_mode(self) -> None:
+        self.assertEqual(
+            {f"dual:{prefix}" for prefix in app.SECONDARY_LANGUAGE_NAMES},
+            set(app.VOICE_MODE_CHOICES.values()) - {"single"},
+        )
+
+    def test_latin_language_labels_route_to_the_selected_voice_without_being_spoken(self) -> None:
+        self.assertEqual(
+            [("en", "Good morning.\n"), ("e", "Buenos días.")],
+            app.spoken_language_segments(
+                "English: Good morning.\nSpanish: Buenos días.", "e"
+            ),
+        )
+        kokoro = mock.Mock()
+        kokoro.create.side_effect = (
+            (np.ones(120, dtype=np.float32), 24_000),
+            (np.ones(160, dtype=np.float32), 24_000),
+        )
+        engine = app.VoiceEngines(
+            voice="af_heart",
+            secondary_language="e",
+            secondary_voice="ef_dora",
+            voice_mode="dual:e",
+        )
+        with mock.patch.object(engine, "load_kokoro", return_value=kokoro):
+            samples, sample_rate = engine.synthesize(
+                "English: Good morning.\nSpanish: Buenos días."
+            )
+
+        self.assertEqual(24_000, sample_rate)
+        self.assertEqual(280, samples.size)
+        self.assertEqual(
+            ["af_heart", "ef_dora"],
+            [call.kwargs["voice"] for call in kokoro.create.call_args_list],
+        )
+        self.assertEqual(
+            [
+                ("en", "Hello, how are you?"),
+                ("e", "Hola, ¿cómo estás?"),
+                ("en", "Goodbye."),
+                ("e", "Adiós."),
+            ],
+            app.spoken_language_segments(
+                "- English: Hello, how are you? / Spanish: Hola, ¿cómo estás?\n"
+                "- English: Goodbye. / Spanish: Adiós.",
+                "e",
+            ),
+        )
+
+    def test_legacy_mandarin_settings_migrate_to_the_chinese_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_file = Path(temporary) / "settings.json"
+            settings_file.write_text(
+                json.dumps({"voice_mode": "auto", "mandarin_voice": "zm_yunxi"}),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(app, "SETTINGS_FILE", settings_file),
+                mock.patch.object(app, "ensure_local_layout"),
+            ):
+                loaded = app.load_settings()
+
+        self.assertEqual("dual:z", loaded["voice_mode"])
+        self.assertEqual("zm_yunxi", loaded["secondary_voices"]["z"])
+
     def test_mixed_language_synthesis_stops_before_the_next_voice_segment(self) -> None:
         cancel_event = threading.Event()
         kokoro = mock.Mock()
@@ -340,7 +410,7 @@ class AudioSettingsTest(unittest.TestCase):
             return np.ones(120, dtype=np.float32), 24_000
 
         kokoro.create.side_effect = cancel_after_first_segment
-        engine = app.VoiceEngines(voice="af_heart", mandarin_voice="zf_xiaoni")
+        engine = app.VoiceEngines(voice="af_heart", secondary_voice="zf_xiaoni")
         with mock.patch.object(engine, "load_kokoro", return_value=kokoro):
             samples, sample_rate = engine.synthesize(
                 "Good morning. 早上好。 Continue in English.",
@@ -367,6 +437,12 @@ class AudioSettingsTest(unittest.TestCase):
                 [request, {"role": "user", "content": "Use English only now."}]
             )
         )
+        spanish_request = {
+            "role": "user",
+            "content": "Teach me using both English and Spanish.",
+        }
+        self.assertTrue(app.bilingual_learning_mode([spanish_request], "e"))
+        self.assertFalse(app.bilingual_learning_mode([spanish_request], "f"))
 
     def test_microphone_transcription_detects_english_or_mandarin(self) -> None:
         audio = np.ones(app.SAMPLE_RATE, dtype=np.float32) * 0.1
@@ -396,6 +472,29 @@ class AudioSettingsTest(unittest.TestCase):
                 model.transcribe.assert_called_once()
                 self.assertEqual(expected_language, model.transcribe.call_args.kwargs["language"])
                 self.assertEqual("transcribe", model.transcribe.call_args.kwargs["task"])
+
+    def test_microphone_transcription_uses_the_selected_language_pair(self) -> None:
+        audio = np.ones(app.SAMPLE_RATE, dtype=np.float32) * 0.1
+        mel = mock.Mock()
+        mel.to.return_value = mel
+        whisper_module = SimpleNamespace(
+            pad_or_trim=mock.Mock(return_value=audio),
+            log_mel_spectrogram=mock.Mock(return_value=mel),
+        )
+        model = mock.Mock()
+        model.dims.n_mels = 80
+        model.device = "cpu"
+        model.detect_language.return_value = (None, {"en": 0.04, "es": 0.91})
+        model.transcribe.return_value = {"text": "Buenos días."}
+        engine = app.VoiceEngines(voice_mode="dual:e")
+        with (
+            mock.patch.object(engine, "load_whisper", return_value=model),
+            mock.patch.dict("sys.modules", {"whisper": whisper_module}),
+        ):
+            transcript = engine.transcribe(audio)
+
+        self.assertEqual("Buenos días.", transcript)
+        self.assertEqual("es", model.transcribe.call_args.kwargs["language"])
 
     def test_english_only_whisper_model_falls_back_to_english(self) -> None:
         audio = np.ones(app.SAMPLE_RATE, dtype=np.float32) * 0.1

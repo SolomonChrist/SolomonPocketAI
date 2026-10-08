@@ -295,7 +295,7 @@ def require_models() -> None:
     if missing:
         joined = "\n".join(str(path) for path in missing)
         raise RuntimeError(
-            "Solomon Pocket AI's local voice models are missing. Run setup.ps1 first.\n\n"
+            "Solomon Pocket AI's local voice models are missing. Run .\\setup.bat first.\n\n"
             + joined
         )
 

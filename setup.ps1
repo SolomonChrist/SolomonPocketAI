@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$NoLaunch,
-    [switch]$SkipSelfTest
+    [switch]$SkipSelfTest,
+    [switch]$PrerequisitesOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,6 +15,80 @@ function Write-Step([string]$Text) {
     Write-Host "`n==> $Text" -ForegroundColor Cyan
 }
 
+function Warn-LowDiskSpace {
+    $driveRoot = [System.IO.Path]::GetPathRoot($root)
+    try {
+        $drive = New-Object System.IO.DriveInfo($driveRoot)
+        $recommendedBytes = 7GB
+        if ($drive.AvailableFreeSpace -lt $recommendedBytes) {
+            $freeGiB = [math]::Round($drive.AvailableFreeSpace / 1GB, 1)
+            Write-Warning "Only $freeGiB GB is free on $driveRoot. A first setup may need about 7 GB."
+        }
+    } catch {
+        Write-Warning 'Could not check free disk space; setup will continue.'
+    }
+}
+
+function Refresh-ProcessPath {
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = (@($machinePath, $userPath) | Where-Object { $_ }) -join ';'
+}
+
+function Get-WinGetPath {
+    $command = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($command) {
+        return $command.Source
+    }
+    return $null
+}
+
+function Install-WinGetPackage(
+    [string]$Id,
+    [string]$DisplayName,
+    [switch]$UserScope
+) {
+    $winget = Get-WinGetPath
+    if (-not $winget) {
+        throw "$DisplayName is missing and Windows Package Manager (winget) is unavailable. Install or update 'App Installer' from Microsoft Store, then double-click setup.bat again."
+    }
+
+    Write-Host "Installing $DisplayName with Windows Package Manager..."
+    $arguments = @(
+        'install', '--id', $Id, '--exact',
+        '--accept-package-agreements', '--accept-source-agreements',
+        '--silent'
+    )
+    if ($UserScope) {
+        $arguments += @('--scope', 'user')
+    }
+    & $winget @arguments
+    $installExitCode = $LASTEXITCODE
+    if ($installExitCode -notin @(0, 3010)) {
+        throw "$DisplayName installation failed (winget exit code $installExitCode)."
+    }
+    Refresh-ProcessPath
+}
+
+function Resolve-Git {
+    $command = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($command) {
+        return $command.Source
+    }
+    $candidates = @(
+        (Join-Path $env:ProgramFiles 'Git\cmd\git.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Git\cmd\git.exe')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
 function Test-OllamaApi {
     try {
         Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -Method Get -TimeoutSec 2 | Out-Null
@@ -24,18 +99,22 @@ function Test-OllamaApi {
 }
 
 function Resolve-Python311 {
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        & py -3.11 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>$null
+    $launcher = Get-Command py.exe -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($launcher) {
+        & $launcher.Source -3.11 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' 2>$null
         if ($LASTEXITCODE -eq 0) {
-            return @{ Launcher = 'py'; Prefix = @('-3.11') }
+            return @{ Launcher = $launcher.Source; Prefix = @('-3.11') }
         }
     }
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python311\python.exe'),
-        (Get-Command python -ErrorAction SilentlyContinue).Source
+        (Join-Path $env:ProgramFiles 'Python311\python.exe'),
+        (Get-Command python.exe -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1).Source
     ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
     foreach ($candidate in $candidates) {
-        & $candidate -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>$null
+        & $candidate -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' 2>$null
         if ($LASTEXITCODE -eq 0) {
             return @{ Launcher = $candidate; Prefix = @() }
         }
@@ -46,33 +125,92 @@ function Resolve-Python311 {
 Set-Location -LiteralPath $root
 Write-Host 'Solomon Pocket AI - private local setup' -ForegroundColor Green
 Write-Host 'Models and conversations stay inside SolomonPocketAIData, which Git ignores.'
+Warn-LowDiskSpace
 
-Write-Step 'Checking Python 3.11+'
+Write-Step 'Checking Git'
+$git = Resolve-Git
+if (-not $git) {
+    Install-WinGetPackage -Id 'Git.Git' -DisplayName 'Git'
+    $git = Resolve-Git
+}
+if (-not $git) {
+    throw 'Git was installed but could not be found. Double-click setup.bat again; a Windows restart should not normally be necessary.'
+}
+$gitVersion = & $git --version
+if ($LASTEXITCODE -ne 0) {
+    throw 'Git was found but could not be started.'
+}
+Write-Host "Found $gitVersion"
+
+Write-Step 'Checking the tested Python 3.11 runtime'
 $pythonInfo = Resolve-Python311
 if (-not $pythonInfo) {
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        throw 'Python 3.11 is required. Install it from https://www.python.org/downloads/ and rerun setup.bat.'
-    }
-    Write-Host 'Installing Python 3.11 with Windows Package Manager...'
-    & winget install --id Python.Python.3.11 --exact --accept-package-agreements --accept-source-agreements --silent
-    if ($LASTEXITCODE -ne 0) { throw 'Python 3.11 installation failed.' }
+    Install-WinGetPackage -Id 'Python.Python.3.11' -DisplayName 'Python 3.11' -UserScope
     $pythonInfo = Resolve-Python311
 }
 $pythonLauncher = $pythonInfo.Launcher
 $pythonPrefix = @($pythonInfo.Prefix)
-if (-not $pythonLauncher) { throw 'Python 3.11 was installed but could not be started. Restart Windows and rerun setup.bat.' }
+if (-not $pythonLauncher) { throw 'Python 3.11 was installed but could not be found. Double-click setup.bat again; a Windows restart should not normally be necessary.' }
 $versionText = & $pythonLauncher @pythonPrefix -c 'import sys; print(sys.version_info.major,sys.version_info.minor)'
 if ($LASTEXITCODE -ne 0) {
-    throw 'Python 3.11 could not be started. Install Python 3.11+ and rerun setup.bat.'
+    throw 'Python 3.11 could not be started. Double-click setup.bat again.'
 }
 $versionParts = $versionText.Trim().Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
 $version = [version]("$($versionParts[0]).$($versionParts[1])")
-if ($version -lt [version]'3.11') {
-    throw "Python 3.11 or newer is required; found $version."
+if ($version.Major -ne 3 -or $version.Minor -ne 11) {
+    throw "The tested runtime is Python 3.11; found $version instead."
+}
+Write-Host "Found Python $version"
+
+Write-Step 'Checking the local Ollama runtime'
+$ollama = (Get-Command ollama.exe -CommandType Application -ErrorAction SilentlyContinue |
+    Select-Object -First 1).Source
+if (-not $ollama) {
+    $standardOllama = Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe'
+    if (Test-Path -LiteralPath $standardOllama -PathType Leaf) {
+        $ollama = $standardOllama
+    }
+}
+if (-not $ollama) {
+    Install-WinGetPackage -Id 'Ollama.Ollama' -DisplayName 'Ollama'
+    $standardOllama = Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe'
+    if (Test-Path -LiteralPath $standardOllama -PathType Leaf) {
+        $ollama = $standardOllama
+    } else {
+        $ollama = (Get-Command ollama.exe -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1).Source
+    }
+}
+if (-not $ollama) { throw 'Ollama was installed but could not be found. Double-click setup.bat again.' }
+$ollamaVersion = & $ollama --version
+if ($LASTEXITCODE -ne 0) { throw 'Ollama was found but could not be started.' }
+Write-Host "Found $ollamaVersion"
+
+if ($PrerequisitesOnly) {
+    Write-Host "`nGit, Python 3.11, and Ollama are ready." -ForegroundColor Green
+    exit 0
 }
 
 Write-Step 'Creating the private Python environment'
-if (-not (Test-Path -LiteralPath $venvPython)) {
+if (Test-Path -LiteralPath $venvRoot) {
+    $venvIsCompatible = $false
+    if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
+        & $venvPython -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' 2>$null
+        $venvIsCompatible = ($LASTEXITCODE -eq 0)
+    }
+    if (-not $venvIsCompatible) {
+        $backupName = '.venv-incompatible-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+        $backupPath = Join-Path $root $backupName
+        $suffix = 1
+        while (Test-Path -LiteralPath $backupPath) {
+            $backupPath = Join-Path $root ($backupName + '-' + $suffix)
+            $suffix += 1
+        }
+        Move-Item -LiteralPath $venvRoot -Destination $backupPath
+        Write-Host "Moved the incompatible Python environment to $backupPath"
+    }
+}
+if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
     & $pythonLauncher @pythonPrefix -m venv $venvRoot
     if ($LASTEXITCODE -ne 0) { throw 'Could not create .venv.' }
 }
@@ -84,30 +222,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not install Python dependencies.' }
 Write-Step 'Downloading local speech models with checksum verification'
 & $venvPython (Join-Path $root 'scripts\download_models.py') --data-root $dataRoot
 if ($LASTEXITCODE -ne 0) { throw 'Could not prepare local speech models.' }
-
-Write-Step 'Checking the local Ollama runtime'
-$ollama = (Get-Command ollama -ErrorAction SilentlyContinue).Source
-if (-not $ollama) {
-    $standardOllama = Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe'
-    if (Test-Path -LiteralPath $standardOllama) {
-        $ollama = $standardOllama
-    }
-}
-if (-not $ollama) {
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        throw 'Ollama is required. Install it from https://ollama.com/download/windows and rerun setup.bat.'
-    }
-    Write-Host 'Installing Ollama with Windows Package Manager...'
-    & winget install --id Ollama.Ollama --exact --accept-package-agreements --accept-source-agreements --silent
-    if ($LASTEXITCODE -ne 0) { throw 'Ollama installation failed.' }
-    $standardOllama = Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe'
-    if (Test-Path -LiteralPath $standardOllama) {
-        $ollama = $standardOllama
-    } else {
-        $ollama = (Get-Command ollama -ErrorAction SilentlyContinue).Source
-    }
-}
-if (-not $ollama) { throw 'Ollama was installed but its executable could not be found. Restart Windows and rerun setup.bat.' }
 
 if (-not (Test-OllamaApi)) {
     Start-Process -FilePath $ollama -ArgumentList 'serve' -WindowStyle Hidden

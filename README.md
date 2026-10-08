@@ -6,19 +6,23 @@
 
 A simple, private voice assistant that runs on your Windows PC. Talk naturally, type a message, import a document, inspect a photo, or ask it to look through the camera once. The conversation model, speech recognition, speech generation, memory, and camera analysis run locally.
 
-## Start in one command
+## Install from scratch
 
-Requirements: Windows 10 or 11, an internet connection for the first setup, a microphone, and roughly 5 GB of free disk space.
+You do not need to install Git, Python, Python packages, or Ollama manually. The setup checks them and installs the tested versions when needed. You need Windows 10 or 11, Windows Package Manager (`winget`, included with the Microsoft Store **App Installer**), an internet connection for the first setup, a microphone, and roughly 7 GB of free disk space.
 
-1. Download or clone this repository.
-2. Open the folder in Terminal.
-3. Run:
+1. On GitHub, choose **Code > Download ZIP**. This route does not require Git.
+2. Extract the ZIP, then open the extracted `SolomonPocketAI` folder.
+3. Double-click **`setup.bat`**.
 
-```bat
-setup.bat
+If you prefer Windows Terminal, open it in that folder and run this exact command:
+
+```powershell
+.\setup.bat
 ```
 
-Setup creates an isolated Python environment, installs Ollama if needed, downloads the local language and speech models, verifies the engines, and launches the app. Later, double-click `start-solomon-pocket-ai.bat` to run it again.
+Do not type only `setup` in PowerShell. `setup` is the name of an unrelated PowerShell/Pester command on some computers, which produces “The Setup command may only be used inside a Describe block.” The `.\setup.bat` form explicitly runs this project's installer.
+
+Setup installs or verifies Git, the tested Python 3.11 runtime, all packages in `desktop-requirements.txt`, Ollama, and the local language and speech models. It creates an isolated Python environment, verifies the engines, and launches the app. If an earlier attempt created an environment with the wrong Python version, setup safely moves that folder aside and rebuilds it. Later, double-click `start-solomon-pocket-ai.bat` to run the app again.
 
 ## What it can do
 

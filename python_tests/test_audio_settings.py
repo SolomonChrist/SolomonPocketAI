@@ -120,6 +120,23 @@ class AudioSettingsTest(unittest.TestCase):
         self.assertEqual(44_100, played_samples.size)
         self.assertEqual(8, play.call_args.kwargs["device"])
 
+    def test_natural_file_requests_route_to_the_workspace_reader(self) -> None:
+        detect = app.SolomonPocketAIApp._detect_tool_action
+        requests = (
+            "Can you tell me what the poster says in the image I just gave you?",
+            "Yes, it's in the inbox folder. Check it.",
+            "Can you see the JPG I just shared?",
+            "What is in the latest image I uploaded?",
+        )
+        for request in requests:
+            with self.subTest(request=request):
+                self.assertEqual(("read", ""), detect(None, request))
+
+    def test_file_routing_does_not_capture_unrelated_vision_language(self) -> None:
+        detect = app.SolomonPocketAIApp._detect_tool_action
+        self.assertIsNone(detect(None, "Can you see what I mean?"))
+        self.assertEqual(("camera", "Please look through the camera"), detect(None, "Please look through the camera"))
+
 
 if __name__ == "__main__":
     unittest.main()

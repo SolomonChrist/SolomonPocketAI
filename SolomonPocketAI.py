@@ -1602,17 +1602,57 @@ class SolomonPocketAIApp:
         if "weather" in lowered:
             match = re.search(r"\bweather\s+(?:today\s+)?(?:in|for)\s+(.+?)[?.!]*$", stripped, re.IGNORECASE)
             return "weather", match.group(1).strip() if match else ""
+        camera_words = ("look", "see", "view", "describe", "show", "watch")
+        if "camera" in lowered and any(word in lowered for word in camera_words):
+            return "camera", stripped
+        read_words = (
+            "read",
+            "summarize",
+            "summarise",
+            "analyze",
+            "analyse",
+            "describe",
+            "check",
+            "open",
+            "look at",
+            "tell me",
+            "what does",
+            "what is in",
+            "what's in",
+            "can you see",
+        )
+        file_words = (
+            "pdf",
+            "file",
+            "document",
+            "photo",
+            "image",
+            "picture",
+            "poster",
+            "jpg",
+            "jpeg",
+            "png",
+            "webp",
+        )
+        workspace_words = (
+            "inbox",
+            "workspace",
+            "trusted folder",
+            "approved folder",
+            "shared",
+            "uploaded",
+            "added",
+            "gave you",
+        )
+        wants_read = any(word in lowered for word in read_words)
+        mentions_file = any(word in lowered for word in file_words)
+        mentions_workspace = any(word in lowered for word in workspace_words)
+        if wants_read and (mentions_file or mentions_workspace):
+            return "read", ""
         if any(word in lowered for word in ("current", "latest")) and re.match(
             r"^(who|what|when|which)\b", lowered
         ):
             return "fact", stripped
-        camera_words = ("look", "see", "view", "describe", "show", "watch")
-        if "camera" in lowered and any(word in lowered for word in camera_words):
-            return "camera", stripped
-        read_words = ("read", "summarize", "summarise", "analyze", "analyse", "describe")
-        file_words = ("pdf", "file", "document", "photo", "image", "picture")
-        if any(word in lowered for word in read_words) and any(word in lowered for word in file_words):
-            return "read", ""
         return None
 
     def _run_tool_action(

@@ -998,13 +998,23 @@ class VoiceEngines:
             )
         return str(result.get("text", "")).strip()
 
-    def synthesize(self, text: str) -> tuple[np.ndarray, int]:
+    def synthesize(
+        self,
+        text: str,
+        cancel_event: threading.Event | None = None,
+    ) -> tuple[np.ndarray, int]:
+        if cancel_event is not None and cancel_event.is_set():
+            return np.empty(0, dtype=np.float32), 24_000
         kokoro = self.load_kokoro()
         rendered_segments: list[np.ndarray] = []
         output_rate: int | None = None
         for language, speech_text in spoken_language_segments(text[:1800]):
+            if cancel_event is not None and cancel_event.is_set():
+                break
             selected_voice = self.mandarin_voice if language == "zh" else self.voice
             samples, sample_rate = self._synthesize_segment(kokoro, speech_text, selected_voice)
+            if cancel_event is not None and cancel_event.is_set():
+                break
             if output_rate is None:
                 output_rate = sample_rate
             elif sample_rate != output_rate:
@@ -1220,7 +1230,10 @@ class StreamingSpeech:
                 phrase = self.phrases.get()
                 if phrase is self._END or self.stopped.is_set():
                     return
-                samples, sample_rate = self.engines.synthesize(str(phrase))
+                samples, sample_rate = self.engines.synthesize(
+                    str(phrase),
+                    cancel_event=self.stopped,
+                )
                 if self.stopped.is_set():
                     return
                 samples = np.asarray(samples, dtype=np.float32).reshape(-1)
@@ -1318,6 +1331,8 @@ class SolomonPocketAIApp:
         self.live_partial_text = ""
         self.active_speaker: StreamingSpeech | None = None
         self.voice_generation = 0
+        self.response_generation = 0
+        self.response_text_ready = threading.Event()
         self.busy = False
         self.ui_events: queue.Queue[tuple[str, object]] = queue.Queue()
 
@@ -1654,6 +1669,7 @@ class SolomonPocketAIApp:
         if len(summary) > 70:
             summary = summary[:67].rstrip() + "…"
         self.stop_voice()
+        self.response_text_ready.set()
         voice_generation = self.voice_generation
         self._set_busy(True)
         self.status.set(f"Replaying: {summary}")
@@ -1822,6 +1838,9 @@ class SolomonPocketAIApp:
         if command_response is not None:
             self._show_direct_response(command_response, "Ready — local Markdown memory updated.")
             return
+        self.response_generation += 1
+        response_generation = self.response_generation
+        self.response_text_ready.clear()
         tool_action = self._detect_tool_action(text)
         if tool_action is not None:
             kind, argument = tool_action
@@ -1829,13 +1848,18 @@ class SolomonPocketAIApp:
             self.status.set("Running a narrow Solomon Pocket AI tool…")
             threading.Thread(
                 target=self._run_tool_action,
-                args=(kind, argument, text, transcription_seconds),
+                args=(kind, argument, text, transcription_seconds, response_generation),
                 daemon=True,
             ).start()
             return
         self._set_busy(True)
         self.status.set("Thinking locally…")
-        threading.Thread(target=self._respond, args=(text, transcription_seconds), daemon=True).start()
+        threading.Thread(
+            target=self._respond,
+            args=(text, transcription_seconds),
+            kwargs={"response_generation": response_generation},
+            daemon=True,
+        ).start()
 
     def _show_direct_response(self, response: str, status: str, speak: bool = True) -> None:
         self.messages.append({"role": "assistant", "content": response})
@@ -1843,6 +1867,7 @@ class SolomonPocketAIApp:
         self._append_visible("assistant", response)
         self.status.set(status)
         self._set_busy(False)
+        self.response_text_ready.set()
         if speak:
             voice_generation = self.voice_generation
             threading.Thread(
@@ -1946,6 +1971,7 @@ class SolomonPocketAIApp:
         argument: str,
         user_text: str,
         transcription_seconds: float | None,
+        response_generation: int,
     ) -> None:
         try:
             if kind == "direct":
@@ -1999,6 +2025,7 @@ class SolomonPocketAIApp:
                     transcription_seconds,
                     model_messages=model_messages,
                     grounded_tool_response=True,
+                    response_generation=response_generation,
                 )
                 return
             if kind == "camera":
@@ -2016,6 +2043,7 @@ class SolomonPocketAIApp:
                     model_messages=model_messages,
                     image_bytes=image,
                     grounded_tool_response=True,
+                    response_generation=response_generation,
                 )
                 return
             if kind == "read":
@@ -2034,6 +2062,7 @@ class SolomonPocketAIApp:
                         model_messages=model_messages,
                         image_bytes=bytes(item["bytes"]),
                         grounded_tool_response=True,
+                        response_generation=response_generation,
                     )
                 else:
                     prompt = (
@@ -2048,6 +2077,7 @@ class SolomonPocketAIApp:
                         transcription_seconds,
                         model_messages=model_messages,
                         grounded_tool_response=True,
+                        response_generation=response_generation,
                     )
                 return
             raise PocketToolError("That Solomon Pocket AI tool is not available.")
@@ -2081,7 +2111,12 @@ class SolomonPocketAIApp:
         model_messages: list[dict[str, str]] | None = None,
         image_bytes: bytes | None = None,
         grounded_tool_response: bool = False,
+        response_generation: int | None = None,
     ) -> None:
+        if response_generation is None:
+            self.response_generation += 1
+            response_generation = self.response_generation
+            self.response_text_ready.clear()
         speaker = StreamingSpeech(self.engines)
         self.active_speaker = speaker
         try:
@@ -2106,6 +2141,8 @@ class SolomonPocketAIApp:
                 speaker.feed(response)
             self.messages.append({"role": "assistant", "content": response})
             self._save_session()
+            if response_generation == self.response_generation:
+                self.response_text_ready.set()
             self.ui_events.put(("assistant_done", None))
             if likely_memory_statement(text):
                 threading.Thread(target=self._remember_from_turn, args=(text,), daemon=True).start()
@@ -2122,10 +2159,12 @@ class SolomonPocketAIApp:
             pieces.append(f"answer {timing['total']:.1f}s")
             pieces.append(f"first voice {voice_timing['first_audio']:.1f}s")
             pieces.append(f"voice done {voice_timing['total']:.1f}s")
-            self.ui_events.put(("idle", "Ready — " + " • ".join(pieces)))
+            self.ui_events.put(
+                ("response_idle", (response_generation, "Ready — " + " • ".join(pieces)))
+            )
         except Exception as exc:
             speaker.stop()
-            self.ui_events.put(("error", str(exc)))
+            self.ui_events.put(("response_error", (response_generation, str(exc))))
         finally:
             if self.active_speaker is speaker:
                 self.active_speaker = None
@@ -2136,6 +2175,9 @@ class SolomonPocketAIApp:
             self.active_speaker.stop()
         self.engines.stop_speaking()
         self.status.set("Voice stopped.")
+        if self.response_text_ready.is_set():
+            self._set_busy(False)
+            self.entry.focus_set()
 
     def _remember_from_turn(self, user_text: str) -> None:
         fact = extract_memory_fact(user_text)
@@ -2173,6 +2215,7 @@ class SolomonPocketAIApp:
                     self.transcript.see(tk.END)
                     self.status.set("Speaking…")
                 elif event == "warm_ready":
+                    self.response_text_ready.set()
                     self.status.set(f"Ready — local models warmed in {float(value):.1f}s.")
                     self._set_busy(False)
                     self.entry.focus_set()
@@ -2192,10 +2235,23 @@ class SolomonPocketAIApp:
                     self.status.set(str(value))
                     self._set_busy(False)
                     self.entry.focus_set()
+                elif event == "response_idle":
+                    generation, message = value
+                    if int(generation) == self.response_generation:
+                        self.status.set(str(message))
+                        self._set_busy(False)
+                        self.entry.focus_set()
                 elif event == "error":
                     self.status.set("Something went wrong. You can try again.")
                     self._set_busy(False)
                     messagebox.showerror("Solomon Pocket AI", str(value))
+                elif event == "response_error":
+                    generation, message = value
+                    if int(generation) == self.response_generation:
+                        self.response_text_ready.set()
+                        self.status.set("Something went wrong. You can try again.")
+                        self._set_busy(False)
+                        messagebox.showerror("Solomon Pocket AI", str(message))
         except queue.Empty:
             pass
         self.root.after(80, self._drain_ui_events)

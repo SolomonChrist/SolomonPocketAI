@@ -122,7 +122,7 @@ class AudioSettingsTest(unittest.TestCase):
         second_phrase_ready = threading.Event()
         overlap_observed: list[bool] = []
 
-        def synthesize(text: str) -> tuple[np.ndarray, int]:
+        def synthesize(text: str, cancel_event=None) -> tuple[np.ndarray, int]:
             if text.startswith("Second"):
                 second_phrase_ready.set()
             return np.ones(240, dtype=np.float32), 24_000
@@ -175,11 +175,16 @@ class AudioSettingsTest(unittest.TestCase):
         speaker = mock.Mock()
         engines = mock.Mock()
         status = mock.Mock()
+        response_text_ready = threading.Event()
+        response_text_ready.set()
         fake_app = SimpleNamespace(
             voice_generation=3,
             active_speaker=speaker,
             engines=engines,
             status=status,
+            response_text_ready=response_text_ready,
+            _set_busy=mock.Mock(),
+            entry=mock.Mock(),
         )
 
         app.SolomonPocketAIApp.stop_voice(fake_app)
@@ -189,6 +194,8 @@ class AudioSettingsTest(unittest.TestCase):
         self.assertEqual(2, speaker.stop.call_count)
         self.assertEqual(2, engines.stop_speaking.call_count)
         self.assertEqual(2, status.set.call_count)
+        self.assertEqual([mock.call(False), mock.call(False)], fake_app._set_busy.call_args_list)
+        self.assertEqual(2, fake_app.entry.focus_set.call_count)
 
     def test_stopped_direct_voice_does_not_begin_after_synthesis(self) -> None:
         engines = mock.Mock()
@@ -282,6 +289,26 @@ class AudioSettingsTest(unittest.TestCase):
             [call.kwargs["lang"] for call in kokoro.create.call_args_list],
         )
         self.assertEqual("早上好 — ", engine._zh_g2p.call_args.args[0])
+
+    def test_mixed_language_synthesis_stops_before_the_next_voice_segment(self) -> None:
+        cancel_event = threading.Event()
+        kokoro = mock.Mock()
+
+        def cancel_after_first_segment(*_args, **_kwargs):
+            cancel_event.set()
+            return np.ones(120, dtype=np.float32), 24_000
+
+        kokoro.create.side_effect = cancel_after_first_segment
+        engine = app.VoiceEngines(voice="af_heart", mandarin_voice="zf_xiaoni")
+        with mock.patch.object(engine, "load_kokoro", return_value=kokoro):
+            samples, sample_rate = engine.synthesize(
+                "Good morning. 早上好。 Continue in English.",
+                cancel_event=cancel_event,
+            )
+
+        self.assertEqual(24_000, sample_rate)
+        self.assertEqual(0, samples.size)
+        self.assertEqual(1, kokoro.create.call_count)
 
     def test_bilingual_learning_mode_persists_and_can_be_ended(self) -> None:
         request = {
